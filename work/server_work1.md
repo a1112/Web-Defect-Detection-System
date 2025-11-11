@@ -31,6 +31,6 @@ api 内容 不要直接访问数据库，通过修改优化 bkjc_database 完成
 
 编写 demo 测试功能
 
-
+D:\Project\BKVison\bkjc_api 该命令实现了类似的功能，有些可以过去进行参考
     
     

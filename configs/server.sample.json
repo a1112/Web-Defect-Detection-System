@@ -1,0 +1,21 @@
+{
+  "database": {
+    "drive": "mysql",
+    "host": "127.0.0.1",
+    "port": 3306,
+    "user": "root",
+    "password": "nercar",
+    "charset": "utf8",
+    "database_type": "ncdhotstrip"
+  },
+  "images": {
+    "top_root": "\\\\127.0.0.1\\imgsrc1",
+    "bottom_root": "\\\\127.0.0.1\\imgsrc2",
+    "default_view": "2D",
+    "file_extension": "jpg",
+    "mode": "L",
+    "max_cached_frames": 64,
+    "max_cached_tiles": 256,
+    "max_cached_mosaics": 8
+  }
+}
