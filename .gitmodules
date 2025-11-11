@@ -1,0 +1,3 @@
+[submodule "link_project/bkjc_database"]
+	path = link_project/bkjc_database
+	url = https://github.com/a1112/bkjc_database
