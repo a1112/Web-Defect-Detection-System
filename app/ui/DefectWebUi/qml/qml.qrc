@@ -1,0 +1,8 @@
+<RCC>
+    <qresource prefix="/qml">
+        <file>main.qml</file>
+        <file>components/ImagePreview.qml</file>
+        <file>components/PanelHeader.qml</file>
+        <file>components/SideRail.qml</file>
+    </qresource>
+</RCC>

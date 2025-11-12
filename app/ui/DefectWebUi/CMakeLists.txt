@@ -15,22 +15,12 @@ qt_add_executable(defect_web_ui
     src/main.cpp
 )
 
-qt_add_qml_module(defect_web_ui
-    URI DefectWebUi
-    VERSION 1.0
-    QML_FILES
-        qml/main.qml
-        qml/components/ImagePreview.qml
-        qml/components/PanelHeader.qml
-        qml/components/SideRail.qml
+qt6_add_resources(QML_BUNDLE
+    qml/qml.qrc
+    resources/resources.qrc
 )
 
-qt_add_resources(defect_web_ui "assets"
-    PREFIX "/"
-    FILES
-        qtquickcontrols2.conf
-        resources/images/placeholder.png
-)
+target_sources(defect_web_ui PRIVATE ${QML_BUNDLE})
 
 target_link_libraries(defect_web_ui
     PRIVATE

@@ -7,7 +7,13 @@ from datetime import datetime
 from functools import lru_cache
 from typing import Optional
 
+import logging
+
 from fastapi import Depends, FastAPI, HTTPException, Query, Response
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from pathlib import Path
 
@@ -23,7 +29,82 @@ from app.server.services.steel_service import SteelService
 
 from app.server.config.settings import ENV_CONFIG_KEY, ensure_config_file
 
+logger = logging.getLogger(__name__)
+
 app = FastAPI(title="Web Defect Detection API", version="0.1.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=os.getenv("CORS_ALLOW_ORIGINS", "*").split(","),
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+class CoopCoepMiddleware(BaseHTTPMiddleware):
+    """Ensure /ui responses can use SharedArrayBuffer by enabling cross-origin isolation."""
+
+    async def dispatch(self, request, call_next):
+        response = await call_next(request)
+        path = request.url.path or ""
+        if path == "/" or path.startswith("/ui"):
+            response.headers.setdefault("Cross-Origin-Opener-Policy", "same-origin")
+            response.headers.setdefault("Cross-Origin-Embedder-Policy", "require-corp")
+            response.headers.setdefault("Cross-Origin-Resource-Policy", "same-origin")
+        return response
+
+
+app.add_middleware(CoopCoepMiddleware)
+
+UI_BUILD_ENV_KEY = "DEFECT_UI_BUILD_DIR"
+DEFAULT_UI_BUILD_DIR = (
+    REPO_ROOT
+    / "app"
+    / "ui"
+    / "DefectWebUi"
+    / "build"
+    / "WebAssembly_Qt_6_10_0_multi_threaded-MinSizeRel"
+)
+UI_BUILD_DIR = Path(os.getenv(UI_BUILD_ENV_KEY, DEFAULT_UI_BUILD_DIR))
+SSL_CERT_ENV = "DEFECT_SSL_CERT"
+SSL_KEY_ENV = "DEFECT_SSL_KEY"
+
+
+def _resolve_ui_index() -> Path | None:
+    for name in ("DefectWebUi.html", "index.html"):
+        candidate = UI_BUILD_DIR / name
+        if candidate.exists():
+            return candidate
+    return None
+
+
+if UI_BUILD_DIR.exists():
+    app.mount(
+        "/ui",
+        StaticFiles(directory=str(UI_BUILD_DIR), html=True),
+        name="defect-web-ui",
+    )
+
+    @app.get("/", include_in_schema=False)
+    async def serve_ui_root():
+        index_path = _resolve_ui_index()
+        if not index_path:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    "Defect Web UI index not found inside "
+                    f"{UI_BUILD_DIR}. Check your WASM build output."
+                ),
+            )
+        return FileResponse(index_path)
+else:
+    logger.warning(
+        "Defect Web UI build directory %s not found. "
+        "Set %s to point at your Qt WASM output to enable the frontend.",
+        UI_BUILD_DIR,
+        UI_BUILD_ENV_KEY,
+    )
 
 
 def get_steel_service() -> SteelService:
@@ -266,6 +347,8 @@ if __name__ == "__main__":
         default=os.getenv("BKJC_API_RELOAD", "false").lower() == "true",
         help="Enable auto-reload (development only)",
     )
+    parser.add_argument("--ssl-certfile",default="./certs/server.crt", help="Path to SSL certificate (PEM)")
+    parser.add_argument("--ssl-keyfile",default="./certs/server.key", help="Path to SSL private key (PEM)")
     args = parser.parse_args()
 
     if args.config:
@@ -273,4 +356,18 @@ if __name__ == "__main__":
 
     ensure_config_file(args.config)
 
-    uvicorn.run("app.server.main:app", host=args.host, port=args.port, reload=args.reload)
+    ssl_cert = args.ssl_certfile or os.getenv(SSL_CERT_ENV)
+    ssl_key = args.ssl_keyfile or os.getenv(SSL_KEY_ENV)
+    if bool(ssl_cert) ^ bool(ssl_key):
+        raise RuntimeError(
+            "Both SSL certificate and key must be provided. "
+            f"Pass --ssl-certfile/--ssl-keyfile or set {SSL_CERT_ENV}/{SSL_KEY_ENV}."
+        )
+    uvicorn.run(
+        "app.server.main:app",
+        host=args.host,
+        port=args.port,
+        reload=args.reload,
+        ssl_certfile=ssl_cert,
+        ssl_keyfile=ssl_key,
+    )

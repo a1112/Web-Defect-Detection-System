@@ -3,6 +3,7 @@ import QtQuick.Window
 import QtQuick.Controls
 import QtQuick.Layouts
 import QtQuick.Dialogs
+import QtQuick.Controls.Material
 
 import "components"
 
@@ -16,7 +17,8 @@ ApplicationWindow {
     Material.theme: Material.Dark
     Material.accent: Material.LightBlue
 
-    property alias imageUrl: frameBridge.sourceUrl
+    property url placeholderUrl: "https://dummyimage.com/960x540/1a2138/ffffff.png&text=Defect+Preview"
+    property url imageUrl: placeholderUrl
     property date lastRefresh: new Date()
 
     header: PanelHeader {
@@ -24,7 +26,7 @@ ApplicationWindow {
         subtitle: qsTr("WASM ready build - minimal inspection shell")
     }
 
-    contentItem: Item {
+    Item {
         anchors.fill: parent
 
         RowLayout {
@@ -80,8 +82,7 @@ ApplicationWindow {
                                         text: qsTr("Load URL")
                                         Layout.preferredWidth: 140
                                         onClicked: {
-                                            frameBridge.loadFromString(urlField.text)
-                                            refreshFrame()
+                                            loadFromField()
                                         }
                                     }
 
@@ -89,8 +90,8 @@ ApplicationWindow {
                                         text: qsTr("Use Placeholder")
                                         Layout.preferredWidth: 160
                                         onClicked: {
-                                            frameBridge.useSample()
-                                            urlField.text = frameBridge.sourceUrl.toString()
+                                            imageUrl = placeholderUrl
+                                            urlField.text = imageUrl.toString()
                                             refreshFrame()
                                         }
                                     }
@@ -126,7 +127,6 @@ ApplicationWindow {
                                 delegate: ItemDelegate {
                                     width: ListView.view.width
                                     text: model.label
-                                    description: model.detail
                                 }
                             }
                         }
@@ -157,8 +157,22 @@ ApplicationWindow {
         lastRefresh = new Date()
     }
 
+    function loadFromField() {
+        var candidate = urlField.text.trim()
+        if (candidate.length === 0) {
+            return
+        }
+        if (!candidate.startsWith("http://") && !candidate.startsWith("https://")) {
+            candidate = "http://" + candidate
+        }
+        imageUrl = candidate
+        urlField.text = imageUrl.toString()
+        refreshFrame()
+    }
+
     Component.onCompleted: {
-        frameBridge.useSample()
+        imageUrl = placeholderUrl
+        urlField.text = imageUrl.toString()
         refreshFrame()
     }
 }
