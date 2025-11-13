@@ -16,6 +16,7 @@ Rectangle {
         ListElement { label: qsTr("Live Monitor"); iconName: "view-media" }
         ListElement { label: qsTr("Detections"); iconName: "chart-xy" }
         ListElement { label: qsTr("History"); iconName: "time" }
+        ListElement { label: qsTr("Tile Demo"); iconName: "map" }
     }
 
     ListView {

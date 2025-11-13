@@ -4,5 +4,6 @@
         <file>components/ImagePreview.qml</file>
         <file>components/PanelHeader.qml</file>
         <file>components/SideRail.qml</file>
+        <file>components/TileViewport.qml</file>
     </qresource>
 </RCC>

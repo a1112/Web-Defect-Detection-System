@@ -17,8 +17,9 @@ ApplicationWindow {
     Material.theme: Material.Dark
     Material.accent: Material.LightBlue
 
+    property url apiBaseUrl: "http://192.168.1.10:8000"
     property url placeholderUrl: "https://dummyimage.com/960x540/1a2138/ffffff.png&text=Defect+Preview"
-    property url imageUrl: placeholderUrl
+    property url imageUrl: apiBaseUrl + "/api/images/mosaic?surface=top&seq_no=1&view=2D&limit=256&stride=4&width=1280"
     property date lastRefresh: new Date()
 
     header: PanelHeader {
@@ -143,6 +144,148 @@ ApplicationWindow {
                         font.pixelSize: 20
                     }
                 }
+
+                Item {
+                    id: tileDemoPage
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    property string lastTileMessage: qsTr("尚未选中瓦片")
+
+                    ColumnLayout {
+                        anchors.fill: parent
+                        spacing: 16
+
+                        TileViewport {
+                            id: tileViewport
+                            Layout.fillWidth: true
+                            Layout.fillHeight: true
+                            baseUrl: apiBaseUrl
+                            surface: surfaceSelector.currentText
+                            seqNo: seqField.value
+                            view: viewField.currentText
+                            level: levelField.value
+                            tileSize: tileSizeField.value
+                            columns: columnField.value
+                            rows: rowField.value
+                            showGrid: gridSwitch.checked
+                            onTileTapped: function(tileX, tileY) {
+                                tileDemoPage.lastTileMessage = qsTr("Tile (%1, %2) @ level %3").arg(tileX).arg(tileY).arg(level)
+                            }
+                        }
+
+                        Pane {
+                            Layout.fillWidth: true
+
+                            contentItem: ColumnLayout {
+                                spacing: 12
+
+                                Flow {
+                                    width: parent.width
+                                    spacing: 12
+
+                                    ComboBox {
+                                        id: surfaceSelector
+                                        width: 140
+                                        model: ["top", "bottom"]
+                                        currentIndex: 0
+                                        editable: false
+                                        delegate: ItemDelegate {
+                                            required property string modelData
+                                            text: modelData
+                                        }
+                                    }
+
+                                    ComboBox {
+                                        id: viewField
+                                        width: 160
+                                        model: ["2D", "3D", "IR"]
+                                        currentIndex: 0
+                                        delegate: ItemDelegate {
+                                            required property string modelData
+                                            text: modelData
+                                        }
+                                    }
+
+                                    SpinBox {
+                                        id: seqField
+                                        width: 120
+                                        from: 1
+                                        to: 999999
+                                        value: 1
+                                        stepSize: 1
+                                    }
+
+                                    SpinBox {
+                                        id: levelField
+                                        width: 120
+                                        from: 0
+                                        to: 8
+                                        value: 0
+                                        stepSize: 1
+                                        textFromValue: function(value, locale) {
+                                            return qsTr("Level %1").arg(value)
+                                        }
+                                    }
+
+                                    SpinBox {
+                                        id: tileSizeField
+                                        width: 130
+                                        from: 64
+                                        to: 1024
+                                        stepSize: 64
+                                        value: 512
+                                    }
+
+                                    SpinBox {
+                                        id: columnField
+                                        width: 120
+                                        from: 1
+                                        to: 12
+                                        value: 6
+                                    }
+
+                                    SpinBox {
+                                        id: rowField
+                                        width: 120
+                                        from: 1
+                                        to: 12
+                                        value: 3
+                                    }
+
+                                    Switch {
+                                        id: gridSwitch
+                                        text: qsTr("显示网格")
+                                        checked: true
+                                    }
+                                }
+
+                                RowLayout {
+                                    width: parent.width
+                                    spacing: 12
+
+                                    Button {
+                                        text: qsTr("刷新瓦片")
+                                        onClicked: tileViewport.reloadTiles()
+                                    }
+
+                                    Button {
+                                        text: qsTr("重置视图")
+                                        onClicked: tileViewport.resetView()
+                                    }
+
+                                    Item { Layout.fillWidth: true }
+
+                                    Label {
+                                        text: tileDemoPage.lastTileMessage
+                                        color: "#b0b7c3"
+                                        elide: Text.ElideRight
+                                        horizontalAlignment: Text.AlignRight
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -171,7 +314,6 @@ ApplicationWindow {
     }
 
     Component.onCompleted: {
-        imageUrl = placeholderUrl
         urlField.text = imageUrl.toString()
         refreshFrame()
     }
