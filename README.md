@@ -4,3 +4,7 @@
 
 # 数据库理解子项目 
     https://github.com/a1112/bkjc_database 管理数据库连接
+
+    git submodule add https://github.com/a1112/bkjc_database
+
+    git submodule add https://github.com/a1112/Figmaaidefectdetectionsystem  link_project

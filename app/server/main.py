@@ -88,6 +88,7 @@ if UI_BUILD_DIR.exists():
 
     @app.get("/", include_in_schema=False)
     async def serve_ui_root():
+        """提供前端静态页面入口文件。"""
         index_path = _resolve_ui_index()
         if not index_path:
             raise HTTPException(
@@ -123,12 +124,13 @@ def get_image_service() -> ImageService:
 
 @app.get("/health")
 def healthcheck():
+    """健康检查接口，用于判断服务是否存活。"""
     return {"status": "ok"}
 
 
 @app.on_event("startup")
 def init_app():
-    # Establish database connection during startup so first request is fast
+    """应用启动时预热数据库连接，避免首个请求超时。"""
     deps.get_dbm()
 
 
@@ -137,9 +139,10 @@ def api_list_steels(
     limit: int = Query(20, ge=1, le=500),
     defect_only: bool = False,
     start_seq: Optional[int] = Query(default=None, description="Start seqNo (exclusive)"),
-order: str = Query(default="desc", pattern="^(asc|desc)$"),
+    order: str = Query(default="desc", pattern="^(asc|desc)$"),
     service: SteelService = Depends(get_steel_service),
 ):
+    """按序号倒序查询最近的钢卷列表，支持缺陷过滤和升降序切换。"""
     desc = order != "asc"
     return service.list_recent(limit=limit, defect_only=defect_only, start_seq=start_seq, desc=desc)
 
@@ -150,30 +153,35 @@ def api_list_steels_by_date(
     end: datetime = Query(..., description="End datetime (inclusive)"),
     service: SteelService = Depends(get_steel_service),
 ):
+    """按时间范围查询钢卷列表（闭区间）。"""
     return service.by_date(start=start, end=end)
 
 
 @app.get("/api/steels/steel-no/{steel_no}", response_model=SteelListResponse)
 def api_steel_by_no(steel_no: str, service: SteelService = Depends(get_steel_service)):
+    """根据钢卷号精确查询钢卷信息。"""
     return service.by_steel_no(steel_no)
 
 
 @app.get("/api/steels/id/{steel_id}", response_model=SteelListResponse)
 def api_steel_by_id(steel_id: int, service: SteelService = Depends(get_steel_service)):
+    """根据数据库 ID 查询钢卷信息。"""
     return service.by_id(steel_id)
 
 
 @app.get("/api/steels/seq/{seq_no}", response_model=SteelListResponse)
 def api_steel_by_seq(seq_no: int, service: SteelService = Depends(get_steel_service)):
+    """根据序列号查询单卷记录。"""
     return service.by_seq(seq_no)
 
 
 @app.get("/api/defects/{seq_no}", response_model=DefectResponse)
 def api_defects(
     seq_no: int,
-surface: Optional[str] = Query(default=None, pattern="^(top|bottom)$"),
+    surface: Optional[str] = Query(default=None, pattern="^(top|bottom)$"),
     service: DefectService = Depends(get_defect_service),
 ):
+    """查询指定序列的缺陷列表，可按上下表面过滤。"""
     return service.defects_by_seq(seq_no, surface=surface)
 
 
@@ -183,7 +191,7 @@ def _image_media_type(fmt: str) -> str:
 
 @app.get("/api/images/frame")
 def api_frame_image(
-surface: str = Query(..., pattern="^(top|bottom)$"),
+    surface: str = Query(..., pattern="^(top|bottom)$"),
     seq_no: int = Query(...),
     image_index: int = Query(..., ge=0),
     width: Optional[int] = Query(default=None, ge=1, le=8192),
@@ -192,6 +200,7 @@ surface: str = Query(..., pattern="^(top|bottom)$"),
     fmt: str = Query(default="JPEG"),
     service: ImageService = Depends(get_image_service),
 ):
+    """获取单帧图像，支持指定上下表面、视角与目标尺寸。"""
     try:
         payload = service.get_frame(
             surface=surface,
@@ -210,13 +219,14 @@ surface: str = Query(..., pattern="^(top|bottom)$"),
 @app.get("/api/images/defect/{defect_id}")
 def api_defect_crop(
     defect_id: int,
-surface: str = Query(..., pattern="^(top|bottom)$"),
+    surface: str = Query(..., pattern="^(top|bottom)$"),
     expand: int = Query(default=0, ge=0, le=512),
     width: Optional[int] = Query(default=None, ge=1, le=4096),
     height: Optional[int] = Query(default=None, ge=1, le=4096),
     fmt: str = Query(default="JPEG"),
     service: ImageService = Depends(get_image_service),
 ):
+    """按缺陷 ID 裁剪缺陷区域，并在响应头返回缺陷元数据。"""
     try:
         data, defect = service.crop_defect(
             surface=surface,
@@ -238,7 +248,7 @@ surface: str = Query(..., pattern="^(top|bottom)$"),
 
 @app.get("/api/images/crop")
 def api_custom_crop(
-surface: str = Query(..., pattern="^(top|bottom)$"),
+    surface: str = Query(..., pattern="^(top|bottom)$"),
     seq_no: int = Query(...),
     image_index: int = Query(...),
     x: int = Query(..., ge=0),
@@ -251,6 +261,7 @@ surface: str = Query(..., pattern="^(top|bottom)$"),
     fmt: str = Query(default="JPEG"),
     service: ImageService = Depends(get_image_service),
 ):
+    """按自定义坐标裁剪指定帧，支持扩展边界及输出尺寸。"""
     try:
         payload = service.crop_custom(
             surface=surface,
@@ -272,7 +283,7 @@ surface: str = Query(..., pattern="^(top|bottom)$"),
 
 @app.get("/api/images/mosaic")
 def api_mosaic_image(
-surface: str = Query(..., pattern="^(top|bottom)$"),
+    surface: str = Query(..., pattern="^(top|bottom)$"),
     seq_no: int = Query(...),
     view: Optional[str] = Query(default=None),
     limit: Optional[int] = Query(default=None, ge=1, le=10000),
@@ -283,6 +294,7 @@ surface: str = Query(..., pattern="^(top|bottom)$"),
     fmt: str = Query(default="JPEG"),
     service: ImageService = Depends(get_image_service),
 ):
+    """生成指定序列的长带拼接图，可配置抽帧、跳过数量和尺寸。"""
     try:
         payload = service.get_mosaic(
             surface=surface,
@@ -312,6 +324,7 @@ def api_tile_image(
     fmt: str = Query(default="JPEG"),
     service: ImageService = Depends(get_image_service),
 ):
+    """按瓦片信息返回拼接图的分块，便于大图分片加载。"""
     try:
         payload = service.get_tile(
             surface=surface,
@@ -340,15 +353,15 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Web Defect Detection API server")
     parser.add_argument("--config", help="Path to JSON config file")
     parser.add_argument("--host", default=os.getenv("BKJC_API_HOST", "0.0.0.0"))
-    parser.add_argument("--port", type=int, default=int(os.getenv("BKJC_API_PORT", "8000")))
+    parser.add_argument("--port", type=int, default=int(os.getenv("BKJC_API_PORT", "8120")))
     parser.add_argument(
         "--reload",
         action="store_true",
         default=os.getenv("BKJC_API_RELOAD", "false").lower() == "true",
         help="Enable auto-reload (development only)",
     )
-    parser.add_argument("--ssl-certfile",default="./certs/server.crt", help="Path to SSL certificate (PEM)")
-    parser.add_argument("--ssl-keyfile",default="./certs/server.key", help="Path to SSL private key (PEM)")
+    parser.add_argument("--ssl-certfile", default="", help="Path to SSL certificate (PEM)")
+    parser.add_argument("--ssl-keyfile", default=None, help="Path to SSL private key (PEM)")
     args = parser.parse_args()
 
     if args.config:
@@ -358,16 +371,21 @@ if __name__ == "__main__":
 
     ssl_cert = args.ssl_certfile or os.getenv(SSL_CERT_ENV)
     ssl_key = args.ssl_keyfile or os.getenv(SSL_KEY_ENV)
-    if bool(ssl_cert) ^ bool(ssl_key):
-        raise RuntimeError(
-            "Both SSL certificate and key must be provided. "
-            f"Pass --ssl-certfile/--ssl-keyfile or set {SSL_CERT_ENV}/{SSL_KEY_ENV}."
-        )
+    ssl_kwargs = {}
+    if ssl_cert or ssl_key:
+        if bool(ssl_cert) ^ bool(ssl_key):
+            raise RuntimeError(
+                "Both SSL certificate and key must be provided. "
+                f"Pass --ssl-certfile/--ssl-keyfile or set {SSL_CERT_ENV}/{SSL_KEY_ENV}."
+            )
+        ssl_kwargs = {"ssl_certfile": ssl_cert, "ssl_keyfile": ssl_key}
+        logger.info("HTTPS enabled with SSL cert/key.")
+    else:
+        logger.info("No SSL cert/key provided; serving over HTTP.")
     uvicorn.run(
         "app.server.main:app",
         host=args.host,
         port=args.port,
         reload=args.reload,
-        ssl_certfile=ssl_cert,
-        ssl_keyfile=ssl_key,
+        **ssl_kwargs,
     )
