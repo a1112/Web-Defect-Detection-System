@@ -14,6 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
+from sqlalchemy import text
 
 from pathlib import Path
 
@@ -22,7 +23,15 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from app.server import deps
-from app.server.schemas import DefectResponse, SteelListResponse
+from app.server.schemas import (
+    DefectResponse,
+    HealthStatus,
+    SteelListResponse,
+    UiDefectItem,
+    UiDefectResponse,
+    UiSteelItem,
+    UiSteelListResponse,
+)
 from app.server.services.defect_service import DefectService
 from app.server.services.image_service import ImageService
 from app.server.services.steel_service import SteelService
@@ -31,7 +40,9 @@ from app.server.config.settings import ENV_CONFIG_KEY, ensure_config_file
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Web Defect Detection API", version="0.1.0")
+API_VERSION = "0.1.0"
+
+app = FastAPI(title="Web Defect Detection API", version=API_VERSION)
 
 app.add_middleware(
     CORSMiddleware,
@@ -109,12 +120,12 @@ else:
 
 
 def get_steel_service() -> SteelService:
-    return SteelService(deps.get_dbm())
+    return SteelService(deps.get_main_db)
 
 
 @lru_cache()
 def get_defect_service() -> DefectService:
-    return DefectService(deps.get_dbm())
+    return DefectService(deps.get_defect_db)
 
 
 @lru_cache()
@@ -122,16 +133,71 @@ def get_image_service() -> ImageService:
     return ImageService(deps.get_settings(), get_defect_service())
 
 
-@app.get("/health")
+def _grade_to_level(grade: Optional[int] | None) -> str:
+    """将内部整数等级映射为 A-D 等级，用于 Web UI."""
+    if grade is None:
+        return "D"
+    mapping = {1: "A", 2: "B", 3: "C", 4: "D"}
+    return mapping.get(int(grade), "D")
+
+
+DEFECT_CLASS_LABELS: dict[int, str] = {
+    1: "纵向裂纹",
+    2: "横向裂纹",
+    3: "异物压入",
+    4: "孔洞",
+    5: "辊印",
+    6: "压氧",
+    7: "边裂",
+    8: "划伤",
+}
+
+
+def _grade_to_severity(grade: Optional[int] | None) -> str:
+    """根据缺陷等级粗略映射严重程度，供 Web UI 使用。"""
+    if grade is None:
+        return "medium"
+    grade_val = int(grade)
+    if grade_val <= 1:
+        return "low"
+    if grade_val == 2:
+        return "medium"
+    return "high"
+
+
+@app.get("/health", response_model=HealthStatus)
 def healthcheck():
-    """健康检查接口，用于判断服务是否存活。"""
-    return {"status": "ok"}
+    """健康检查接口，用于判断服务是否存活及数据库大致状态。"""
+    db_connected = False
+    latency_ms: float | None = None
+    try:
+        with deps.get_main_db() as session:
+            session.execute(text("SELECT 1"))
+            db_connected = True
+    except Exception:  # pragma: no cover - 健康检查中容错
+        db_connected = False
+
+    status = "healthy" if db_connected else "unhealthy"
+    return HealthStatus(
+        status=status,
+        timestamp=datetime.utcnow(),
+        version=API_VERSION,
+        database={
+            "connected": db_connected,
+            "latency_ms": latency_ms,
+        },
+    )
 
 
 @app.on_event("startup")
 def init_app():
     """应用启动时预热数据库连接，避免首个请求超时。"""
-    deps.get_dbm()
+    # 触发一次连接，确保连接池初始化
+    try:
+        with deps.get_main_db() as session:
+            session.execute(text("SELECT 1"))
+    except Exception:
+        logger.exception("Failed to warm up main database connection.")
 
 
 @app.get("/api/steels", response_model=SteelListResponse)
@@ -145,6 +211,42 @@ def api_list_steels(
     """按序号倒序查询最近的钢卷列表，支持缺陷过滤和升降序切换。"""
     desc = order != "asc"
     return service.list_recent(limit=limit, defect_only=defect_only, start_seq=start_seq, desc=desc)
+
+
+@app.get("/api/ui/steels", response_model=UiSteelListResponse)
+def api_ui_list_steels(
+    limit: int = Query(20, ge=1, le=500),
+    defect_only: bool = False,
+    start_seq: Optional[int] = Query(default=None, description="Start seqNo (exclusive)"),
+    order: str = Query(default="desc", pattern="^(asc|desc)$"),
+    service: SteelService = Depends(get_steel_service),
+):
+    """
+    Web UI 专用钢板列表接口。
+
+    返回字段命名与前端 Raw 类型一致，便于直接映射到可视化界面。
+    """
+    desc = order != "asc"
+    base = service.list_recent(limit=limit, defect_only=defect_only, start_seq=start_seq, desc=desc)
+    steels: list[UiSteelItem] = []
+    for record in base.items:
+        length = record.produced_length or record.ordered_length
+        width = record.produced_width or record.ordered_width
+        thickness = record.produced_thickness or record.ordered_thickness
+        steels.append(
+            UiSteelItem(
+                seq_no=record.seq_no,
+                steel_no=record.steel_id,
+                steel_type=record.steel_type,
+                length=length,
+                width=width,
+                thickness=thickness,
+                timestamp=record.detect_time,
+                level=_grade_to_level(record.grade),
+                defect_count=record.defect_count,
+            )
+        )
+    return UiSteelListResponse(steels=steels, total=len(steels))
 
 
 @app.get("/api/steels/date", response_model=SteelListResponse)
@@ -183,6 +285,42 @@ def api_defects(
 ):
     """查询指定序列的缺陷列表，可按上下表面过滤。"""
     return service.defects_by_seq(seq_no, surface=surface)
+
+
+@app.get("/api/ui/defects/{seq_no}", response_model=UiDefectResponse)
+def api_ui_defects(
+    seq_no: int,
+    surface: Optional[str] = Query(default=None, pattern="^(top|bottom)$"),
+    service: DefectService = Depends(get_defect_service),
+):
+    """
+    Web UI 专用缺陷列表接口。
+
+    将内部 DefectRecord 映射为前端 Raw 类型所需字段。
+    """
+    base = service.defects_by_seq(seq_no, surface=surface)
+    defects: list[UiDefectItem] = []
+    for record in base.items:
+        bbox = record.bbox_image
+        width = max(0, bbox.right - bbox.left)
+        height = max(0, bbox.bottom - bbox.top)
+        defect_type = DEFECT_CLASS_LABELS.get(record.class_id or 0, "未知缺陷")
+        severity = _grade_to_severity(record.grade)
+        defects.append(
+            UiDefectItem(
+                defect_id=str(record.defect_id),
+                defect_type=defect_type,
+                severity=severity,  # type: ignore[arg-type]
+                x=bbox.left,
+                y=bbox.top,
+                width=width,
+                height=height,
+                confidence=1.0,
+                surface=record.surface,  # type: ignore[arg-type]
+                image_index=record.image_index or 0,
+            )
+        )
+    return UiDefectResponse(seq_no=base.seq_no, defects=defects, total_count=len(defects))
 
 
 def _image_media_type(fmt: str) -> str:

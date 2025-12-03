@@ -3,8 +3,10 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Iterable, Optional
 
-from bkjc_database.property.DataBaseInterFace import DataBaseInterFace
+from sqlalchemy import func
+from sqlalchemy.orm import Session
 
+from ..db.models.ncdhotstrip import Rcvsteelprop, Steelrecord
 from ..schemas import SteelListResponse, SteelRecord
 
 
@@ -18,8 +20,15 @@ def _coerce_int(value):
 
 
 class SteelService:
-    def __init__(self, db: DataBaseInterFace):
-        self.db = db
+    """
+    SQLAlchemy 驱动的钢板查询服务，直接连接 ncdhotstrip 数据库。
+    """
+
+    def __init__(self, session_factory):
+        """
+        :param session_factory: callable returning sqlalchemy.orm.Session
+        """
+        self.session_factory = session_factory
 
     def list_recent(
         self,
@@ -28,41 +37,83 @@ class SteelService:
         start_seq: Optional[int],
         desc: bool,
     ) -> SteelListResponse:
-        raw = self.db.getSteelByNum(limit, defectOnly=defect_only, startID=start_seq, desc=desc)
-        items = [self._to_model(pair) for pair in raw]
-        return SteelListResponse(count=len(items), items=items)
+        with self.session_factory() as session:
+            order_field = Steelrecord.seqNo.desc() if desc else Steelrecord.seqNo.asc()
+            query = session.query(Steelrecord)
+            if start_seq is not None:
+                query = query.filter(Steelrecord.seqNo > start_seq) if desc else query.filter(
+                    Steelrecord.seqNo < start_seq
+                )
+            if defect_only:
+                query = query.filter(Steelrecord.defectNum.isnot(None)).filter(Steelrecord.defectNum > 0)
+
+            records = query.order_by(order_field).limit(limit).all()
+
+            items = self._map_records(session, records, limit)
+            return SteelListResponse(count=len(items), items=items)
 
     def by_seq(self, seq_no: int) -> SteelListResponse:
-        raw = self.db.getSteelBySeqNo(seq_no)
-        items = [self._to_model(pair) for pair in raw]
-        return SteelListResponse(count=len(items), items=items)
+        with self.session_factory() as session:
+            records = (
+                session.query(Steelrecord)
+                .filter(Steelrecord.seqNo == seq_no)
+                .order_by(Steelrecord.id.desc())
+                .all()
+            )
+            items = self._map_records(session, records, None)
+            return SteelListResponse(count=len(items), items=items)
 
     def by_id(self, steel_id: int) -> SteelListResponse:
-        raw = self.db.getSteelById(steel_id)
-        items = [self._to_model(pair) for pair in raw]
-        return SteelListResponse(count=len(items), items=items)
+        with self.session_factory() as session:
+            records = (
+                session.query(Steelrecord)
+                .filter(Steelrecord.id == steel_id)
+                .order_by(Steelrecord.id.desc())
+                .all()
+            )
+            items = self._map_records(session, records, None)
+            return SteelListResponse(count=len(items), items=items)
 
     def by_steel_no(self, steel_no: str) -> SteelListResponse:
-        raw = self.db.getSteelBySteelNo(steel_no)
-        items = [self._to_model(pair) for pair in raw]
-        return SteelListResponse(count=len(items), items=items)
+        with self.session_factory() as session:
+            records = (
+                session.query(Steelrecord)
+                .filter(Steelrecord.steelID.like(f"%{steel_no}%"))
+                .order_by(Steelrecord.seqNo.desc())
+                .all()
+            )
+            items = self._map_records(session, records, None)
+            return SteelListResponse(count=len(items), items=items)
 
     def by_date(self, start: datetime, end: datetime) -> SteelListResponse:
-        raw = self.db.getSteelByDate(start.strftime("%Y-%m-%d %H:%M:%S"), end.strftime("%Y-%m-%d %H:%M:%S"))
-        items = [self._to_model(pair) for pair in raw]
-        return SteelListResponse(count=len(items), items=items)
+        with self.session_factory() as session:
+            records = (
+                session.query(Steelrecord)
+                .filter(Steelrecord.detectTime >= start, Steelrecord.detectTime <= end)
+                .order_by(Steelrecord.seqNo.desc())
+                .all()
+            )
+            items = self._map_records(session, records, None)
+            return SteelListResponse(count=len(items), items=items)
 
-    def _to_model(self, pair: Iterable) -> SteelRecord:
-        steel_obj = None
-        extra = None
-        if isinstance(pair, (list, tuple)) and len(pair) >= 1:
-            steel_obj = pair[0]
-            if len(pair) > 1:
-                extra = pair[1]
-        else:
-            steel_obj = pair
-        if steel_obj is None:
-            raise ValueError("Invalid steel record payload")
+    # ------------------------------------------------------------------ #
+    # Helpers
+    # ------------------------------------------------------------------ #
+    def _map_records(self, session: Session, records: Iterable[Steelrecord], limit: Optional[int]):
+        selected = list(records)
+        if limit:
+            selected = selected[:limit]
+        props = self._load_props(session, selected)
+        return [self._to_model(rec, props.get(rec.steelID)) for rec in selected]
+
+    def _load_props(self, session: Session, records: Iterable[Steelrecord]) -> dict[str, Rcvsteelprop]:
+        steel_ids = {rec.steelID for rec in records if rec.steelID}
+        if not steel_ids:
+            return {}
+        props = session.query(Rcvsteelprop).filter(Rcvsteelprop.steelID.in_(steel_ids)).all()
+        return {prop.steelID: prop for prop in props}
+
+    def _to_model(self, steel_obj: Steelrecord, extra: Optional[Rcvsteelprop]) -> SteelRecord:
         detect_time = getattr(steel_obj, "detectTime", None)
         return SteelRecord(
             seq_no=_coerce_int(getattr(steel_obj, "seqNo", None)),
@@ -72,14 +123,14 @@ class SteelService:
             produced_width=_coerce_int(getattr(steel_obj, "width", None)),
             produced_thickness=_coerce_int(getattr(steel_obj, "thick", None)),
             defect_count=_coerce_int(getattr(steel_obj, "defectNum", None)),
-            top_defect_count=_coerce_int(getattr(steel_obj, "TopDefectNum", None)),
-            bottom_defect_count=_coerce_int(getattr(steel_obj, "BottomDefectNum", None)),
+            top_defect_count=None,
+            bottom_defect_count=None,
             detect_time=detect_time,
             grade=_coerce_int(getattr(steel_obj, "grade", None)),
             warn=_coerce_int(getattr(steel_obj, "warn", None)),
             client=getattr(steel_obj, "client", None),
             hardness=_coerce_int(getattr(steel_obj, "hard", None)),
-            ordered_length=_coerce_int(getattr(extra, "len", None)),
-            ordered_width=_coerce_int(getattr(extra, "width", None)),
-            ordered_thickness=_coerce_int(getattr(extra, "thick", None)),
+            ordered_length=_coerce_int(getattr(extra, "len", None)) if extra else None,
+            ordered_width=_coerce_int(getattr(extra, "width", None)) if extra else None,
+            ordered_thickness=_coerce_int(getattr(extra, "thick", None)) if extra else None,
         )

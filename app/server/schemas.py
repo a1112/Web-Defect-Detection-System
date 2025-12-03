@@ -31,6 +31,25 @@ class SteelListResponse(BaseModel):
     items: list[SteelRecord]
 
 
+class UiSteelItem(BaseModel):
+    """Web UI 专用的钢板信息模型，字段命名与前端 Raw 类型一致。"""
+
+    seq_no: int
+    steel_no: str
+    steel_type: Optional[str] = None
+    length: Optional[int] = None
+    width: Optional[int] = None
+    thickness: Optional[int] = None
+    timestamp: Optional[datetime] = None
+    level: Literal["A", "B", "C", "D"] = "D"
+    defect_count: Optional[int] = None
+
+
+class UiSteelListResponse(BaseModel):
+    steels: list[UiSteelItem]
+    total: int
+
+
 class BoundingBox(BaseModel):
     left: int
     top: int
@@ -66,6 +85,27 @@ class DefectResponse(BaseModel):
     items: list[DefectRecord]
 
 
+class UiDefectItem(BaseModel):
+    """Web UI 专用的缺陷信息模型，字段命名与前端 Raw 类型一致。"""
+
+    defect_id: str
+    defect_type: str
+    severity: Literal["low", "medium", "high"]
+    x: int
+    y: int
+    width: int
+    height: int
+    confidence: float
+    surface: Literal["top", "bottom"]
+    image_index: int
+
+
+class UiDefectResponse(BaseModel):
+    seq_no: int
+    defects: list[UiDefectItem]
+    total_count: int
+
+
 class ImageDescriptor(BaseModel):
     surface: Literal["top", "bottom"]
     seq_no: int
@@ -83,3 +123,14 @@ class TileDescriptor(BaseModel):
     tile_y: int
     tile_size: int
 
+
+class DatabaseStatus(BaseModel):
+    connected: bool
+    latency_ms: Optional[float] = None
+
+
+class HealthStatus(BaseModel):
+    status: Literal["healthy", "unhealthy"]
+    timestamp: datetime
+    version: Optional[str] = None
+    database: Optional[DatabaseStatus] = None
