@@ -40,7 +40,7 @@ class SessionRegistry:
 
 
 def _make_registry(settings: ServerSettings) -> SessionRegistry:
-    main_db = settings.database.database_type or "ncdhotstrip"
+    main_db = settings.database.database_type or "ncdplate"
     defect_db = f"{main_db}defect"
     main_url = _build_url(settings.database, main_db)
     defect_url = _build_url(settings.database, defect_db)

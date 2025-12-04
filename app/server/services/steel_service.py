@@ -6,7 +6,7 @@ from typing import Iterable, Optional
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from ..db.models.ncdhotstrip import Rcvsteelprop, Steelrecord
+from ..db.models.ncdplate import Rcvsteelprop, Steelrecord
 from ..schemas import SteelListResponse, SteelRecord
 
 

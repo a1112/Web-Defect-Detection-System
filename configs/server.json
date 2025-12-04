@@ -6,7 +6,7 @@
     "user": "root",
     "password": "nercar",
     "charset": "utf8",
-    "database_type": "ncdhotstrip"
+    "database_type": "ncdplate"
   },
   "images": {
     "top_root": "\\\\127.0.0.1\\imgsrc1",

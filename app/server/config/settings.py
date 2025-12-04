@@ -22,7 +22,7 @@ class DatabaseSettings(BaseModel):
     user: str = Field(default="root")
     password: str = Field(default="nercar")
     charset: str = Field(default="utf8")
-    database_type: str = Field(default="ncdhotstrip")
+    database_type: str = Field(default="ncdplate")
 
     @property
     def resolved_port(self) -> int:
