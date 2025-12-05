@@ -142,10 +142,10 @@ def api_tile_image(
     surface: str = Query(..., pattern="^(top|bottom)$"),
     seq_no: int = Query(...),
     view: Optional[str] = Query(default=None),
-    level: int = Query(default=0, ge=0, le=8),
+    level: int = Query(default=0, ge=0, le=4),
     tile_x: int = Query(..., ge=0),
     tile_y: int = Query(..., ge=0),
-    tile_size: int = Query(default=512, ge=64, le=2048),
+    tile_size: int = Query(default=1024, ge=64, le=4096),
     fmt: str = Query(default="JPEG"),
     service: ImageService = Depends(get_image_service),
 ):
@@ -170,4 +170,3 @@ def api_tile_image(
         return Response(content=payload, media_type=_image_media_type(fmt), headers=headers)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-
