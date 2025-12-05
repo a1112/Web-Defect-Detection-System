@@ -19,7 +19,7 @@ from sqlalchemy import text
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.server import deps
-from app.server.api import defects, health, images, steels
+from app.server.api import defects, health, images, steels, meta
 from app.server.config.settings import ENV_CONFIG_KEY, ensure_config_file
 
 logger = logging.getLogger(__name__)
@@ -108,6 +108,7 @@ app.include_router(health.router)
 app.include_router(steels.router)
 app.include_router(defects.router)
 app.include_router(images.router)
+app.include_router(meta.router)
 
 
 @app.on_event("startup")

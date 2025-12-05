@@ -142,7 +142,7 @@ def api_tile_image(
     surface: str = Query(..., pattern="^(top|bottom)$"),
     seq_no: int = Query(...),
     view: Optional[str] = Query(default=None),
-    level: int = Query(default=0, ge=0, le=4),
+    level: int = Query(default=0, ge=0, le=2),
     tile_x: int = Query(..., ge=0),
     tile_y: int = Query(..., ge=0),
     tile_size: int = Query(default=1024, ge=64, le=4096),
