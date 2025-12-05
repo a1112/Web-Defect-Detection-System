@@ -1,0 +1,8 @@
+ 不需要管 QML 端的适配
+ /api/defect-classes 现在返回了缺陷字典，
+
+ 修改 子项目 Figmaaidefectdetectionsystem
+    Figmaaidefectdetectionsystem 下的修改
+
+
+    1：缺陷列别 以及模拟数据 统一 在  src/src/api 中，移除重复的数据结构，

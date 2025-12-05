@@ -47,6 +47,25 @@ class ImageService:
             image = resize_image(image, width=width, height=height)
         return encode_image(image, fmt=fmt)
 
+    def get_surface_image_info(
+        self,
+        surface: str,
+        seq_no: int,
+        *,
+        view: Optional[str] = None,
+    ) -> Tuple[int, int, int]:
+        """
+        返回指定序列在某一表面的帧数量及单帧尺寸信息。
+
+        :return: (frame_count, image_width, image_height)
+        """
+        view_dir = view or self.settings.images.default_view
+        frames = self._list_frame_paths(surface, seq_no, view_dir)
+        if not frames:
+            raise FileNotFoundError(f"No frames found for {surface} seq={seq_no}")
+        first = self._load_frame_from_path(frames[0])
+        return len(frames), first.width, first.height
+
     def crop_defect(
         self,
         surface: str,

@@ -96,6 +96,35 @@ class SteelService:
             items = self._map_records(session, records, None)
             return SteelListResponse(count=len(items), items=items)
 
+    def search(
+        self,
+        limit: int,
+        seq_no: Optional[int],
+        steel_no: Optional[str],
+        start: Optional[datetime],
+        end: Optional[datetime],
+        desc: bool = True,
+    ) -> SteelListResponse:
+        """
+        组合条件查询：支持序列号、钢板号模糊、时间范围。
+        """
+        with self.session_factory() as session:
+            order_field = Steelrecord.seqNo.desc() if desc else Steelrecord.seqNo.asc()
+            query = session.query(Steelrecord)
+
+            if seq_no is not None:
+                query = query.filter(Steelrecord.seqNo == seq_no)
+            if steel_no:
+                query = query.filter(Steelrecord.steelID.like(f"%{steel_no}%"))
+            if start is not None:
+                query = query.filter(Steelrecord.detectTime >= start)
+            if end is not None:
+                query = query.filter(Steelrecord.detectTime <= end)
+
+            records = query.order_by(order_field).limit(limit).all()
+            items = self._map_records(session, records, limit)
+            return SteelListResponse(count=len(items), items=items)
+
     # ------------------------------------------------------------------ #
     # Helpers
     # ------------------------------------------------------------------ #

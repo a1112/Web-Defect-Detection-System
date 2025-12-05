@@ -104,6 +104,7 @@ class UiDefectResponse(BaseModel):
     seq_no: int
     defects: list[UiDefectItem]
     total_count: int
+    surface_images: Optional[list[SurfaceImageInfo]] = None
 
 
 class ImageDescriptor(BaseModel):
@@ -112,6 +113,15 @@ class ImageDescriptor(BaseModel):
     image_index: int
     view: str = Field(default="2D")
     format: str = Field(default="jpeg")
+
+
+class SurfaceImageInfo(BaseModel):
+    """按表面划分的帧图像元数据，用于前端绘制缺陷分布图。"""
+
+    surface: Literal["top", "bottom"]
+    frame_count: int = Field(description="该表面可用帧图像数量")
+    image_width: int = Field(description="单帧图像宽度（像素）")
+    image_height: int = Field(description="单帧图像高度（像素）")
 
 
 class TileDescriptor(BaseModel):
