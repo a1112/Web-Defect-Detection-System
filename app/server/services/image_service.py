@@ -148,32 +148,80 @@ class ImageService:
         cached = self.tile_cache.get(cache_key)
         if cached:
             return cached
-        # 1. 获取原始长带拼接图（每个 surface/seq_no 仅构建一次，复用缓存）
-        mosaic = self._build_mosaic(surface, seq_no, view=view, limit=None, skip=0, stride=1)
 
-        # 2. 针对不同 LOD 级别缓存缩放后的马赛克，避免每个瓦片重复 resize
-        if level > 0:
-            lod_key = ("mosaic_lod", surface, seq_no, view_dir, level)
-            cached_lod = self.mosaic_cache.get(lod_key)
-            if cached_lod:
-                working = cached_lod
-            else:
-                scale = 1 / (2**level)
-                target = (max(1, int(mosaic.width * scale)), max(1, int(mosaic.height * scale)))
-                working = mosaic.resize(target, Image.Resampling.BILINEAR)
-                # 缓存该 LOD 图，后续相同级别的瓦片直接复用
-                self.mosaic_cache.put(lod_key, working.copy())
-        else:
-            working = mosaic
-        left = tile_x * tile_size
-        top = tile_y * tile_size
-        # 限制裁剪区域在图像范围内，避免完全落在图像外导致全黑瓦片
-        if left >= working.width or top >= working.height:
+        # 基于原始帧列表按需拼接当前瓦片所需区域，而不是预先构建整幅马赛克。
+        frames = self._list_frame_paths(surface, seq_no, view_dir)
+        if not frames:
+            raise FileNotFoundError(f"No frames found for {surface} seq={seq_no}")
+
+        # 假设所有帧尺寸一致，读取首帧确定尺寸
+        first_img = self._load_frame_from_path(frames[0])
+        # 先对每帧做逆时针 90° 旋转，使钢板长度方向沿水平方向展开
+        rotated_w = first_img.height
+        rotated_h = first_img.width
+
+        # 以 level=0 的长带马赛克为基准，计算当前 LOD 下瓦片在基准坐标系中的覆盖区域
+        mosaic_width = rotated_w * len(frames)
+        mosaic_height = rotated_h
+
+        virtual_tile_size = tile_size * (2**level)
+        left0 = tile_x * virtual_tile_size
+        top0 = tile_y * virtual_tile_size
+
+        if left0 >= mosaic_width or top0 >= mosaic_height:
             raise FileNotFoundError(f"Tile ({tile_x}, {tile_y}) out of bounds for {surface} seq={seq_no}")
-        right = min(left + tile_size, working.width)
-        bottom = min(top + tile_size, working.height)
-        tile = working.crop((left, top, right, bottom))
-        data = encode_image(tile, fmt=fmt)
+
+        right0 = min(left0 + virtual_tile_size, mosaic_width)
+        bottom0 = min(top0 + virtual_tile_size, mosaic_height)
+
+        width0 = right0 - left0
+        height0 = bottom0 - top0
+
+        # 在 level=0 坐标系下构建瓦片，再按 level 缩放
+        base_tile = Image.new("RGB", (width0, height0))
+
+        # 仅加载与该瓦片 X 范围相交的帧，避免一次性加载全部图像
+        first_idx = left0 // rotated_w
+        last_idx = min(len(frames) - 1, (right0 - 1) // rotated_w)
+
+        for idx in range(first_idx, last_idx + 1):
+            stripe_path = frames[idx]
+            src_img = self._load_frame_from_path(stripe_path)
+            rot = src_img.transpose(Image.Transpose.ROTATE_90)
+
+            stripe_x0 = idx * rotated_w
+            stripe_x1 = stripe_x0 + rotated_w
+
+            xg0 = max(left0, stripe_x0)
+            xg1 = min(right0, stripe_x1)
+            if xg1 <= xg0:
+                continue
+
+            # 在单帧（旋转后）坐标系中的裁剪区域
+            x_local0 = xg0 - stripe_x0
+            x_local1 = xg1 - stripe_x0
+
+            # 垂直方向在所有帧上对齐
+            y_local0 = top0
+            y_local1 = bottom0
+
+            crop_box: Box = (int(x_local0), int(y_local0), int(x_local1), int(y_local1))
+            stripe_crop = rot.crop(crop_box)
+
+            # 粘贴到当前瓦片的相对位置
+            dest_x = xg0 - left0
+            base_tile.paste(stripe_crop, (int(dest_x), 0))
+
+        # 对 level>0 进行缩放，得到最终瓦片图像尺寸
+        if level > 0:
+            scale = 1 / (2**level)
+            target_w = max(1, int(round(width0 * scale)))
+            target_h = max(1, int(round(height0 * scale)))
+            tile_img = base_tile.resize((target_w, target_h), Image.Resampling.BILINEAR)
+        else:
+            tile_img = base_tile
+
+        data = encode_image(tile_img, fmt=fmt)
         self.tile_cache.put(cache_key, data)
         return data
 
