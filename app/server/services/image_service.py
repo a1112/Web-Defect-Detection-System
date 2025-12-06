@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import List, Optional, Tuple
+import json
 
 from PIL import Image
 
@@ -60,11 +61,35 @@ class ImageService:
         :return: (frame_count, image_width, image_height)
         """
         view_dir = view or self.settings.images.default_view
-        frames = self._list_frame_paths(surface, seq_no, view_dir)
-        if not frames:
-            raise FileNotFoundError(f"No frames found for {surface} seq={seq_no}")
-        first = self._load_frame_from_path(frames[0])
-        return len(frames), first.width, first.height
+
+        # 优先尝试读取 record.json 中的 imgNum（如果存在）
+        surface_root = self._surface_root(surface)
+        record_dir = surface_root / str(seq_no) / view_dir
+        record_path = record_dir / "record.json"
+
+        frame_count: Optional[int] = None
+        if record_path.exists():
+            try:
+                payload = json.loads(record_path.read_text(encoding="utf-8"))
+                raw = payload.get("imgNum") or payload.get("img_num")
+                if isinstance(raw, int) and raw > 0:
+                    frame_count = raw
+            except Exception:
+                frame_count = None
+
+        # 回退：通过扫描帧文件获取数量
+        if frame_count is None:
+            try:
+                frames = self._list_frame_paths(surface, seq_no, view_dir)
+            except FileNotFoundError:
+                raise
+            frame_count = len(frames)
+
+        # 单帧尺寸由配置文件给出（server.json / server_small.json）
+        image_width = self.settings.images.frame_width
+        image_height = self.settings.images.frame_height
+
+        return frame_count, image_width, image_height
 
     def crop_defect(
         self,

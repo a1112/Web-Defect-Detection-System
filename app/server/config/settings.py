@@ -36,6 +36,16 @@ class ImageSettings(BaseModel):
     bottom_root: Path
     default_view: str = Field(default="2D")
     file_extension: str = Field(default="jpg")
+    frame_width: int = Field(default=16384, ge=1)
+    frame_height: int = Field(default=1024, ge=1)
+    tile_max_level: int = Field(default=2, ge=0)
+    tile_min_level: int = Field(default=0, ge=0)
+    tile_default_size: int = Field(default=1024, ge=64)
+    pixel_scale: float = Field(
+        default=1.0,
+        gt=0,
+        description="Scale factor applied to image-space coordinates (e.g. 0.5 for half-resolution SMALL images).",
+    )
     max_cached_frames: int = Field(default=64, ge=1)
     max_cached_tiles: int = Field(default=256, ge=1)
     max_cached_mosaics: int = Field(default=8, ge=1)

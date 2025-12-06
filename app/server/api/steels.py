@@ -13,19 +13,14 @@ from app.server.services.steel_service import SteelService
 router = APIRouter(prefix="/api")
 
 
-@router.get("/ui/steels", response_model=UiSteelListResponse)
-def api_ui_list_steels(
+@router.get("/steels", response_model=UiSteelListResponse)
+def api_list_steels(
     limit: int = Query(20, ge=1, le=500),
     defect_only: bool = False,
     start_seq: Optional[int] = Query(default=None, description="Start seqNo (exclusive)"),
     order: str = Query(default="desc", pattern="^(asc|desc)$"),
     service: SteelService = Depends(get_steel_service),
 ):
-    """
-    Web UI 专用钢板列表接口。
-
-    返回字段命名与前端 Raw 类型一致，便于直接映射到可视化界面。
-    """
     desc = order != "asc"
     base = service.list_recent(limit=limit, defect_only=defect_only, start_seq=start_seq, desc=desc)
     steels: list[UiSteelItem] = []
@@ -49,8 +44,8 @@ def api_ui_list_steels(
     return UiSteelListResponse(steels=steels, total=len(steels))
 
 
-@router.get("/ui/steels/search", response_model=UiSteelListResponse)
-def api_ui_search_steels(
+@router.get("/steels/search", response_model=UiSteelListResponse)
+def api_search_steels(
     limit: int = Query(20, ge=1, le=500),
     seq_no: Optional[int] = Query(default=None, description="流水号精确匹配"),
     steel_no: Optional[str] = Query(default=None, description="钢板号模糊匹配"),
@@ -59,9 +54,6 @@ def api_ui_search_steels(
     order: str = Query(default="desc", pattern="^(asc|desc)$"),
     service: SteelService = Depends(get_steel_service),
 ):
-    """
-    Web UI 专用查询接口。支持流水号、钢板号、时间范围，结果字段与前端 Raw 类型一致。
-    """
     desc = order != "asc"
     base = service.search(
         limit=limit,

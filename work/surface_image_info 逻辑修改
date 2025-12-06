@@ -1,0 +1,10 @@
+GET /api/ui/defects/{seq_no} 不再  SurfaceImageInfo
+get_surface_image_info 不再从第一张 图像获取大小，而是 通过 server.json 等配置文件进行获取
+按照现在的宽高 在 server.json.. 中 增加 宽高设置，还有 tile_meta 的设置
+api_ui_meta 中同样返回 宽高
+
+增加 /steel-mata/{seqNo} 接口
+读取 record.json 以及 宽高设置
+
+在更换新的 板时 调用 此接口 对 渲染进行指导（缺陷分布图，瓦片图像加载器） ，同时 也访问
+
