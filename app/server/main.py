@@ -5,6 +5,7 @@ import os
 import sys
 import logging
 from pathlib import Path
+from contextlib import asynccontextmanager
 
 # Ensure repository root is on sys.path before importing app.*
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -26,7 +27,19 @@ logger = logging.getLogger(__name__)
 
 API_VERSION = "0.1.0"
 
-app = FastAPI(title="Web Defect Detection API", version=API_VERSION)
+
+@asynccontextmanager
+async def app_lifespan(app: FastAPI):
+    """应用生命周期管理：启动时预热数据库连接。"""
+    try:
+        with deps.get_main_db() as session:
+            session.execute(text("SELECT 1"))
+    except Exception:
+        logger.exception("Failed to warm up main database connection.")
+    yield
+
+
+app = FastAPI(title="Web Defect Detection API", version=API_VERSION, lifespan=app_lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -111,16 +124,6 @@ app.include_router(images.router)
 app.include_router(meta.router)
 
 
-@app.on_event("startup")
-def init_app():
-    """应用启动时预热数据库连接，避免首个请求超时。"""
-    try:
-        with deps.get_main_db() as session:
-            session.execute(text("SELECT 1"))
-    except Exception:
-        logger.exception("Failed to warm up main database connection.")
-
-
 if __name__ == "__main__":
     import uvicorn
 
@@ -129,9 +132,15 @@ if __name__ == "__main__":
     parser.add_argument("--host", default=os.getenv("BKJC_API_HOST", "0.0.0.0"))
     parser.add_argument("--port", type=int, default=int(os.getenv("BKJC_API_PORT", "8120")))
     parser.add_argument(
+        "--workers",
+        type=int,
+        default=int(os.getenv("BKJC_API_WORKERS", "4")),
+        help="Number of Uvicorn worker processes (production only; incompatible with --reload).",
+    )
+    parser.add_argument(
         "--reload",
         action="store_true",
-        default=os.getenv("BKJC_API_RELOAD", "false").lower() == "true",
+        default=os.getenv("BKJC_API_RELOAD", "true").lower() == "true",
         help="Enable auto-reload (development only)",
     )
     parser.add_argument("--ssl-certfile", default="", help="Path to SSL certificate (PEM)")
@@ -142,6 +151,13 @@ if __name__ == "__main__":
         os.environ[ENV_CONFIG_KEY] = str(Path(args.config).resolve())
 
     ensure_config_file(args.config)
+
+    if args.reload and args.workers != 1:
+        logger.warning(
+            "Reload mode is enabled; forcing workers=1 because multiple workers "
+            "are not supported together with auto-reload."
+        )
+        args.workers = 1
 
     ssl_cert = args.ssl_certfile or os.getenv(SSL_CERT_ENV)
     ssl_key = args.ssl_keyfile or os.getenv(SSL_KEY_ENV)
@@ -161,5 +177,6 @@ if __name__ == "__main__":
         host=args.host,
         port=args.port,
         reload=args.reload,
+        workers=args.workers,
         **ssl_kwargs,
     )

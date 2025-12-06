@@ -14,8 +14,7 @@ if not exist "configs\server.json" (
 
 echo [info] Using config: configs\server.json
 
-python app\server\main.py --config configs\server.json --host 0.0.0.0 --port 8120
+python app\server\main.py --config configs\server.json --host 0.0.0.0 --port 8120 --workers 4
 
 popd
 endlocal
-
