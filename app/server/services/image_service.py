@@ -62,18 +62,26 @@ class ImageService:
         """
         view_dir = view or self.settings.images.default_view
 
-        # 优先尝试读取 record.json 中的 imgNum（如果存在）
+        # 优先尝试读取 record.json 中的 imgNum（如果存在）。
+        # small 实例下，record.json 目前仍保存在 2D 目录，因此需要优先从当前视图读取，
+        # 如果没有再回退到 2D 目录。
         surface_root = self._surface_root(surface)
-        record_dir = surface_root / str(seq_no) / view_dir
-        record_path = record_dir / "record.json"
+        candidate_views: list[str] = [view_dir]
+        if view_dir.lower() != "2d":
+            candidate_views.append("2D")
 
         frame_count: Optional[int] = None
-        if record_path.exists():
+        for candidate_view in candidate_views:
+            record_dir = surface_root / str(seq_no) / candidate_view
+            record_path = record_dir / "record.json"
+            if not record_path.exists():
+                continue
             try:
                 payload = json.loads(record_path.read_text(encoding="utf-8"))
                 raw = payload.get("imgNum") or payload.get("img_num")
                 if isinstance(raw, int) and raw > 0:
                     frame_count = raw
+                    break
             except Exception:
                 frame_count = None
 
