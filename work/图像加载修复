@@ -1,0 +1,2 @@
+瓦片图像加载系统 L0 级别的图像宽度应该为 单张图像的高度 （例如 configs/server.json，中的 frame_height ）
+然后 L1 就是 L0*2,L2是L1*2

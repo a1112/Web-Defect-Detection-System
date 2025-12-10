@@ -173,10 +173,14 @@ class ImageService:
         level: int = 0,
         tile_x: int,
         tile_y: int,
-        tile_size: int = 512,
+        tile_size: Optional[int] = None,
         fmt: str = "JPEG",
     ) -> bytes:
         view_dir = view or self.settings.images.default_view
+        base_tile_size = self.settings.images.frame_height
+        # 强制以单帧高度作为 L0级别的瓦片宽度，确保与帧尺寸配置一致
+        if tile_size is None or tile_size != base_tile_size:
+            tile_size = base_tile_size
         cache_key = (surface, seq_no, view_dir, level, tile_x, tile_y, tile_size, fmt)
         cached = self.tile_cache.get(cache_key)
         if cached:
