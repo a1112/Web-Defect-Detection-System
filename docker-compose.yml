@@ -1,0 +1,33 @@
+version: "3.9"
+
+services:
+  defect-api:
+    build: .
+    container_name: defect-api
+    restart: unless-stopped
+    ports:
+      - "${DEFECT_API_PORT:-8120}:8120"
+    environment:
+      SERVER_CONFIG_PATH: /config/server.json
+      DEFECT_UI_BUILD_DIR: /ui-build
+      CORS_ALLOW_ORIGINS: "${CORS_ALLOW_ORIGINS:-*}"
+      DEFECT_SSL_CERT: "${DEFECT_SSL_CERT:-}"
+      DEFECT_SSL_KEY: "${DEFECT_SSL_KEY:-}"
+    volumes:
+      - ./configs/server.sample.json:/config/server.json:ro
+      - ./app/ui/DefectWebUi/build/WebAssembly_Qt_6_10_0_multi_threaded-MinSizeRel:/ui-build:ro
+      - ./TestData:/data/TestData:ro
+      # - /path/to/top_images:/data/images/top:ro
+      # - /path/to/bottom_images:/data/images/bottom:ro
+      # - /path/to/certs:/certs:ro
+    command:
+      [
+        "python",
+        "app/server/main.py",
+        "--config",
+        "/config/server.json",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8120",
+      ]
