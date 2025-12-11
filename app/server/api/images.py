@@ -146,6 +146,7 @@ def api_tile_image(
     tile_x: int = Query(..., ge=0),
     tile_y: int = Query(..., ge=0),
     tile_size: Optional[int] = Query(default=None, ge=64),
+    orientation: str = Query(default="vertical", pattern="^(horizontal|vertical)$"),
     fmt: str = Query(default="JPEG"),
     service: ImageService = Depends(get_image_service),
 ):
@@ -159,6 +160,7 @@ def api_tile_image(
             tile_x=tile_x,
             tile_y=tile_y,
             tile_size=tile_size,
+            orientation=orientation,
             fmt=fmt,
         )
         headers = {
@@ -166,6 +168,7 @@ def api_tile_image(
             "X-Tile-X": str(tile_x),
             "X-Tile-Y": str(tile_y),
             "X-Tile-Size": str(service.settings.images.frame_height),
+            "X-Tile-Orientation": orientation,
         }
         return Response(content=payload, media_type=_image_media_type(fmt), headers=headers)
     except FileNotFoundError as exc:

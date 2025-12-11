@@ -174,6 +174,7 @@ class ImageService:
         tile_x: int,
         tile_y: int,
         tile_size: Optional[int] = None,
+        orientation: str = "vertical",
         fmt: str = "JPEG",
     ) -> bytes:
         view_dir = view or self.settings.images.default_view
@@ -181,7 +182,10 @@ class ImageService:
         # 强制以单帧高度作为 L0级别的瓦片宽度，确保与帧尺寸配置一致
         if tile_size is None or tile_size != base_tile_size:
             tile_size = base_tile_size
-        cache_key = (surface, seq_no, view_dir, level, tile_x, tile_y, tile_size, fmt)
+        orientation = (orientation or "vertical").lower()
+        if orientation not in {"horizontal", "vertical"}:
+            raise ValueError(f"Unsupported orientation '{orientation}'")
+        cache_key = (surface, seq_no, view_dir, orientation, level, tile_x, tile_y, tile_size, fmt)
         cached = self.tile_cache.get(cache_key)
         if cached:
             return cached
@@ -193,13 +197,18 @@ class ImageService:
 
         # 假设所有帧尺寸一致，读取首帧确定尺寸
         first_img = self._load_frame_from_path(frames[0])
-        # 先对每帧做逆时针 90° 旋转，使钢板长度方向沿水平方向展开
-        rotated_w = first_img.height
-        rotated_h = first_img.width
+        frame_w, frame_h = first_img.width, first_img.height
 
-        # 以 level=0 的长带马赛克为基准，计算当前 LOD 下瓦片在基准坐标系中的覆盖区域
-        mosaic_width = rotated_w * len(frames)
-        mosaic_height = rotated_h
+        if orientation == "horizontal":
+            stripe_w = frame_h
+            stripe_h = frame_w
+            mosaic_width = stripe_w * len(frames)
+            mosaic_height = stripe_h
+        else:
+            stripe_w = frame_w
+            stripe_h = frame_h
+            mosaic_width = stripe_w
+            mosaic_height = stripe_h * len(frames)
 
         virtual_tile_size = tile_size * (2**level)
         left0 = tile_x * virtual_tile_size
@@ -217,37 +226,63 @@ class ImageService:
         # 在 level=0 坐标系下构建瓦片，再按 level 缩放
         base_tile = Image.new("RGB", (width0, height0))
 
-        # 仅加载与该瓦片 X 范围相交的帧，避免一次性加载全部图像
-        first_idx = left0 // rotated_w
-        last_idx = min(len(frames) - 1, (right0 - 1) // rotated_w)
+        if orientation == "horizontal":
+            first_idx = left0 // stripe_w
+            last_idx = min(len(frames) - 1, (right0 - 1) // stripe_w)
 
-        for idx in range(first_idx, last_idx + 1):
-            stripe_path = frames[idx]
-            src_img = self._load_frame_from_path(stripe_path)
-            rot = src_img.transpose(Image.Transpose.ROTATE_90)
+            for idx in range(first_idx, last_idx + 1):
+                stripe_path = frames[idx]
+                src_img = self._load_frame_from_path(stripe_path)
+                rot = src_img.transpose(Image.Transpose.ROTATE_90)
 
-            stripe_x0 = idx * rotated_w
-            stripe_x1 = stripe_x0 + rotated_w
+                stripe_x0 = idx * stripe_w
+                stripe_x1 = stripe_x0 + stripe_w
 
-            xg0 = max(left0, stripe_x0)
-            xg1 = min(right0, stripe_x1)
-            if xg1 <= xg0:
-                continue
+                xg0 = max(left0, stripe_x0)
+                xg1 = min(right0, stripe_x1)
+                if xg1 <= xg0:
+                    continue
 
-            # 在单帧（旋转后）坐标系中的裁剪区域
-            x_local0 = xg0 - stripe_x0
-            x_local1 = xg1 - stripe_x0
+                # 在单帧（旋转后）坐标系中的裁剪区域
+                x_local0 = xg0 - stripe_x0
+                x_local1 = xg1 - stripe_x0
 
-            # 垂直方向在所有帧上对齐
-            y_local0 = top0
-            y_local1 = bottom0
+                # 垂直方向在所有帧上对齐
+                y_local0 = top0
+                y_local1 = bottom0
 
-            crop_box: Box = (int(x_local0), int(y_local0), int(x_local1), int(y_local1))
-            stripe_crop = rot.crop(crop_box)
+                crop_box: Box = (int(x_local0), int(y_local0), int(x_local1), int(y_local1))
+                stripe_crop = rot.crop(crop_box)
 
-            # 粘贴到当前瓦片的相对位置
-            dest_x = xg0 - left0
-            base_tile.paste(stripe_crop, (int(dest_x), 0))
+                # 粘贴到当前瓦片的相对位置
+                dest_x = xg0 - left0
+                base_tile.paste(stripe_crop, (int(dest_x), 0))
+        else:
+            first_idx = top0 // stripe_h
+            last_idx = min(len(frames) - 1, (bottom0 - 1) // stripe_h)
+
+            for idx in range(first_idx, last_idx + 1):
+                stripe_path = frames[idx]
+                src_img = self._load_frame_from_path(stripe_path)
+
+                stripe_y0 = idx * stripe_h
+                stripe_y1 = stripe_y0 + stripe_h
+
+                yg0 = max(top0, stripe_y0)
+                yg1 = min(bottom0, stripe_y1)
+                if yg1 <= yg0:
+                    continue
+
+                x_local0 = left0
+                x_local1 = right0
+                y_local0 = yg0 - stripe_y0
+                y_local1 = yg1 - stripe_y0
+
+                crop_box = (int(x_local0), int(y_local0), int(x_local1), int(y_local1))
+                stripe_crop = src_img.crop(crop_box)
+
+                dest_y = yg0 - top0
+                base_tile.paste(stripe_crop, (0, int(dest_y)))
 
         # 对 level>0 进行缩放，得到最终瓦片图像尺寸
         if level > 0:
