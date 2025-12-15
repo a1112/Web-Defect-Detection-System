@@ -17,7 +17,6 @@
     "frame_height": 1024,
     "tile_max_level": 2,
     "tile_min_level": 0,
-    "tile_default_size": 1024,
     "mode": "L",
     "max_cached_frames": 64,
     "max_cached_tiles": 256,

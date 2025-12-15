@@ -40,7 +40,7 @@ class ImageSettings(BaseModel):
     frame_height: int = Field(default=1024, ge=1)
     tile_max_level: int = Field(default=2, ge=0)
     tile_min_level: int = Field(default=0, ge=0)
-    tile_default_size: int = Field(default=1024, ge=64)
+    tile_default_size: Optional[int] = Field(default=None, ge=64)
     pixel_scale: float = Field(
         default=1.0,
         gt=0,
@@ -54,6 +54,15 @@ class ImageSettings(BaseModel):
     @validator("top_root", "bottom_root", pre=True)
     def _coerce_path(cls, value: str | Path) -> Path:
         return Path(value)
+
+    @validator("tile_default_size", always=True)
+    def _default_tile_size(cls, value: Optional[int], values: dict) -> int:
+        if value is not None:
+            return value
+        frame_height = values.get("frame_height")
+        if isinstance(frame_height, int) and frame_height > 0:
+            return frame_height
+        return 1024
 
 
 class ServerSettings(BaseModel):
