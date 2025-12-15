@@ -51,6 +51,13 @@ class ImageSettings(BaseModel):
     max_cached_mosaics: int = Field(default=8, ge=1)
     max_cached_defect_crops: int = Field(default=256, ge=1)
     cache_ttl_seconds: int = Field(default=120, ge=1)
+    disk_cache_enabled: bool = Field(default=False)
+    disk_cache_max_tiles: int = Field(default=2000, ge=1)
+    disk_cache_max_defects: int = Field(default=1000, ge=1)
+    disk_cache_scan_interval_seconds: int = Field(default=5, ge=1)
+    disk_cache_cleanup_interval_seconds: int = Field(default=60, ge=1)
+    disk_cache_precache_enabled: bool = Field(default=False)
+    disk_cache_precache_levels: int = Field(default=1, ge=1)
     mode: str = Field(default="L", description="Pillow image mode, e.g. L/RGB")
 
     @validator("top_root", "bottom_root", pre=True)

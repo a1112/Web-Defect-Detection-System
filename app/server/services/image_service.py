@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import math
+import logging
+import threading
 from pathlib import Path
 from typing import List, Optional, Tuple
 import json
@@ -7,7 +10,7 @@ import json
 from PIL import Image
 
 from ..config.settings import ImageSettings, ServerSettings
-from ..cache import TtlLruCache
+from ..cache import DiskImageCache, TtlLruCache
 from ..schemas import DefectRecord
 from ..utils.image_ops import (
     Box,
@@ -17,6 +20,8 @@ from ..utils.image_ops import (
     resize_image,
 )
 from .defect_service import DefectService
+
+logger = logging.getLogger(__name__)
 
 
 class ImageService:
@@ -42,6 +47,46 @@ class ImageService:
             max_items=image_settings.max_cached_defect_crops,
             ttl_seconds=ttl_seconds,
         )
+
+        self.disk_cache = DiskImageCache(
+            enabled=image_settings.disk_cache_enabled,
+            max_tiles=image_settings.disk_cache_max_tiles,
+            max_defects=image_settings.disk_cache_max_defects,
+            defect_expand=32,
+            tile_size=image_settings.frame_height,
+            frame_width=image_settings.frame_width,
+            frame_height=image_settings.frame_height,
+            view_name=image_settings.default_view,
+        )
+        self._disk_cache_stop = threading.Event()
+        self._disk_cache_thread_started = False
+
+    def start_background_workers(self) -> None:
+        image_settings = self.settings.images
+        if not image_settings.disk_cache_enabled:
+            return
+        logger.info(
+            "disk-cache enabled view=%s tile_size=%s max_level=%s max_tiles=%s max_defects=%s",
+            image_settings.default_view,
+            image_settings.frame_height,
+            self.disk_cache.max_level(),
+            image_settings.disk_cache_max_tiles,
+            image_settings.disk_cache_max_defects,
+        )
+        logger.info(
+            "disk-cache threads precache=%s levels=%s scan_interval=%ss cleanup_interval=%ss",
+            image_settings.disk_cache_precache_enabled,
+            image_settings.disk_cache_precache_levels,
+            image_settings.disk_cache_scan_interval_seconds,
+            image_settings.disk_cache_cleanup_interval_seconds,
+        )
+        self._start_disk_cache_threads()
+
+    def stop_background_workers(self) -> None:
+        if not self.settings.images.disk_cache_enabled:
+            return
+        self._disk_cache_stop.set()
+        logger.info("disk-cache worker threads 停止信号已发送")
 
     # --------------------------------------------------------------------- #
     # Frame level helpers
@@ -131,6 +176,25 @@ class ImageService:
         defect = self.defect_service.find_defect_by_surface(surface, defect_id)
         if not defect or defect.image_index is None:
             raise FileNotFoundError(f"Defect {defect_id} not found on {surface}")
+
+        if (
+            fmt.upper() == "JPEG"
+            and width is None
+            and height is None
+            and expand == self.disk_cache.defect_expand
+        ):
+            disk = self.disk_cache.read_defect(
+                self._surface_root(surface),
+                defect.seq_no,
+                view=None,
+                surface=surface,
+                defect_id=defect_id,
+            )
+            if disk is not None:
+                result = (disk, defect)
+                self.defect_crop_cache.put(cache_key, result)
+                return result
+
         image = self._load_frame(surface, defect.seq_no, defect.image_index)
         box = (defect.bbox_image.left, defect.bbox_image.top, defect.bbox_image.right, defect.bbox_image.bottom)
         box = expand_box(box, expand, image.width, image.height)
@@ -139,6 +203,20 @@ class ImageService:
             cropped = resize_image(cropped, width=width, height=height)
         payload = encode_image(cropped, fmt=fmt)
         result = (payload, defect)
+        if (
+            fmt.upper() == "JPEG"
+            and width is None
+            and height is None
+            and expand == self.disk_cache.defect_expand
+        ):
+            self.disk_cache.write_defect(
+                self._surface_root(surface),
+                defect.seq_no,
+                view=None,
+                surface=surface,
+                defect_id=defect_id,
+                payload=payload,
+            )
         self.defect_crop_cache.put(cache_key, result)
         return result
 
@@ -207,6 +285,22 @@ class ImageService:
         orientation = (orientation or "vertical").lower()
         if orientation not in {"horizontal", "vertical"}:
             raise ValueError(f"Unsupported orientation '{orientation}'")
+        max_level = self.disk_cache.max_level()
+        if level < 0 or level > max_level:
+            raise ValueError(f"Unsupported level {level} (max {max_level})")
+
+        if fmt.upper() == "JPEG":
+            disk = self.disk_cache.read_tile(
+                self._surface_root(surface),
+                seq_no,
+                view=view_dir,
+                level=level,
+                orientation=orientation,
+                tile_x=tile_x,
+                tile_y=tile_y,
+            )
+            if disk is not None:
+                return disk
         cache_key = (surface, seq_no, view_dir, orientation, level, tile_x, tile_y, tile_size, fmt)
         cached = self.tile_cache.get(cache_key)
         if cached is not None:
@@ -317,7 +411,125 @@ class ImageService:
 
         data = encode_image(tile_img, fmt=fmt)
         self.tile_cache.put(cache_key, data)
+        if fmt.upper() == "JPEG":
+            self.disk_cache.write_tile(
+                self._surface_root(surface),
+                seq_no,
+                view=view_dir,
+                level=level,
+                orientation=orientation,
+                tile_x=tile_x,
+                tile_y=tile_y,
+                payload=data,
+            )
         return data
+
+    # --------------------------------------------------------------------- #
+    # Disk cache workers
+    # --------------------------------------------------------------------- #
+    def _start_disk_cache_threads(self) -> None:
+        if self._disk_cache_thread_started:
+            return
+        self._disk_cache_thread_started = True
+        logger.info("disk-cache worker threads 启动")
+        if self.settings.images.disk_cache_precache_enabled:
+            threading.Thread(target=self._disk_cache_precache_loop, daemon=True).start()
+            logger.info("disk-cache precache thread 启动")
+        threading.Thread(target=self._disk_cache_cleanup_loop, daemon=True).start()
+        logger.info("disk-cache cleanup thread 启动")
+
+    def _disk_cache_precache_loop(self) -> None:
+        settings = self.settings.images
+        scan_interval = settings.disk_cache_scan_interval_seconds
+        precache_levels = settings.disk_cache_precache_levels
+        last_seq_by_surface: dict[str, int] = {"top": 0, "bottom": 0}
+
+        while not self._disk_cache_stop.is_set():
+            for surface in ("top", "bottom"):
+                root = self._surface_root(surface)
+                max_seq = self._find_max_seq(root)
+                current = last_seq_by_surface.get(surface, 0)
+                if max_seq is None or max_seq <= current:
+                    continue
+                for seq in range(current + 1, max_seq + 1):
+                    try:
+                        self._precache_seq(surface, seq, precache_levels=precache_levels)
+                        last_seq_by_surface[surface] = seq
+                    except Exception:
+                        break
+            self._disk_cache_stop.wait(scan_interval)
+
+    def _disk_cache_cleanup_loop(self) -> None:
+        settings = self.settings.images
+        interval = settings.disk_cache_cleanup_interval_seconds
+        view_dir = self.settings.images.default_view
+
+        while not self._disk_cache_stop.is_set():
+            for surface in ("top", "bottom"):
+                root = self._surface_root(surface)
+                for seq in self._list_seq_dirs(root)[-20:]:
+                    try:
+                        self.disk_cache.cleanup_seq(root, seq, view=view_dir)
+                    except Exception:
+                        continue
+            self._disk_cache_stop.wait(interval)
+
+    def _precache_seq(self, surface: str, seq_no: int, *, precache_levels: int) -> None:
+        view_dir = self.settings.images.default_view
+        max_level = self.disk_cache.max_level()
+        levels = max(1, int(precache_levels))
+        level_start = max(0, max_level - levels + 1)
+
+        tile_size = self.settings.images.frame_height
+
+        for level in range(max_level, level_start - 1, -1):
+            virtual_tile_size = tile_size * (2**level)
+            frames = self._list_frame_paths(surface, seq_no, view_dir)
+            if not frames:
+                return
+            first_img = self._load_frame_from_path(frames[0])
+            mosaic_width = first_img.width
+            mosaic_height = first_img.height * len(frames)
+
+            tiles_x = max(1, int(math.ceil(mosaic_width / virtual_tile_size)))
+            tiles_y = max(1, int(math.ceil(mosaic_height / virtual_tile_size)))
+
+            for tile_y in range(tiles_y):
+                for tile_x in range(tiles_x):
+                    self.get_tile(
+                        surface=surface,
+                        seq_no=seq_no,
+                        view=view_dir,
+                        level=level,
+                        tile_x=tile_x,
+                        tile_y=tile_y,
+                        tile_size=tile_size,
+                        orientation="vertical",
+                        fmt="JPEG",
+                    )
+        logger.info("disk-cache precache %s/%s/%s 完成", surface, seq_no, view_dir)
+
+    @staticmethod
+    def _list_seq_dirs(root: Path) -> list[int]:
+        if not root.exists():
+            return []
+        seqs: list[int] = []
+        try:
+            for entry in root.iterdir():
+                if not entry.is_dir():
+                    continue
+                try:
+                    seqs.append(int(entry.name))
+                except ValueError:
+                    continue
+        except OSError:
+            return []
+        seqs.sort()
+        return seqs
+
+    def _find_max_seq(self, root: Path) -> Optional[int]:
+        seqs = self._list_seq_dirs(root)
+        return seqs[-1] if seqs else None
 
     # --------------------------------------------------------------------- #
     # Internal helpers

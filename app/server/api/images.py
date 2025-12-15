@@ -45,7 +45,7 @@ def api_frame_image(
 def api_defect_crop(
     defect_id: int,
     surface: str = Query(..., pattern="^(top|bottom)$"),
-    expand: int = Query(default=0, ge=0, le=512),
+    expand: int = Query(default=32, ge=0, le=512),
     width: Optional[int] = Query(default=None, ge=1, le=4096),
     height: Optional[int] = Query(default=None, ge=1, le=4096),
     fmt: str = Query(default="JPEG"),
@@ -142,7 +142,7 @@ def api_tile_image(
     surface: str = Query(..., pattern="^(top|bottom)$"),
     seq_no: int = Query(...),
     view: Optional[str] = Query(default=None),
-    level: int = Query(default=0, ge=0, le=2),
+    level: int = Query(default=0, ge=0, le=16),
     tile_x: int = Query(..., ge=0),
     tile_y: int = Query(..., ge=0),
     tile_size: Optional[int] = Query(default=None, ge=64),
@@ -170,6 +170,8 @@ def api_tile_image(
             "X-Tile-Size": str(service.settings.images.frame_height),
             "X-Tile-Orientation": orientation,
         }
+        cache_ttl = int(getattr(service.settings.images, "cache_ttl_seconds", 120) or 120)
+        headers["Cache-Control"] = f"public, max-age={cache_ttl}"
         return Response(content=payload, media_type=_image_media_type(fmt), headers=headers)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

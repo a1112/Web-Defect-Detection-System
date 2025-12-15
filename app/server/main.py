@@ -21,6 +21,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.server import deps
 from app.server.api import defects, health, images, steels, meta
+from app.server.api.dependencies import get_image_service
 from app.server.config.settings import ENV_CONFIG_KEY, ensure_config_file
 
 logger = logging.getLogger(__name__)
@@ -36,7 +37,16 @@ async def app_lifespan(app: FastAPI):
             session.execute(text("SELECT 1"))
     except Exception:
         logger.exception("Failed to warm up main database connection.")
+
+    try:
+        get_image_service().start_background_workers()
+    except Exception:
+        logger.exception("Failed to start background cache workers.")
     yield
+    try:
+        get_image_service().stop_background_workers()
+    except Exception:
+        logger.exception("Failed to stop background cache workers.")
 
 
 app = FastAPI(title="Web Defect Detection API", version=API_VERSION, lifespan=app_lifespan)

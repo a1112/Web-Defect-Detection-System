@@ -18,6 +18,7 @@
     "max_cached_tiles": 256,
     "max_cached_mosaics": 8,
     "max_cached_defect_crops": 256,
-    "cache_ttl_seconds": 120
+    "cache_ttl_seconds": 120,
+    "disk_cache_enabled": false
   }
 }

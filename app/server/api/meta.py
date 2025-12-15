@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from fastapi import APIRouter, HTTPException, Depends
 
 from app.server.api.utils import get_defect_class_payload
@@ -28,10 +29,13 @@ def api_meta():
     images = settings.images
 
     # 瓦片层级与尺寸从配置文件中读取
+    ratio = images.frame_width / images.frame_height if images.frame_height else 1
+    max_level = int(math.ceil(math.log(ratio, 2))) if ratio > 1 else 0
+
     tile_meta = {
-        "max_level": images.tile_max_level,
-        "min_level": images.tile_min_level,
-        "default_tile_size": images.tile_default_size,
+        "max_level": max_level,
+        "min_level": 0,
+        "default_tile_size": images.frame_height,
     }
 
     image_meta = {
