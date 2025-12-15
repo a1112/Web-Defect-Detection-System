@@ -27,6 +27,6 @@
     "disk_cache_scan_interval_seconds": 5,
     "disk_cache_cleanup_interval_seconds": 60,
     "disk_cache_precache_enabled": true,
-    "disk_cache_precache_levels": 3
+    "disk_cache_precache_levels": 4
   }
 }

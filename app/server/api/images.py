@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import logging
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
 from app.server.api.dependencies import get_image_service
 from app.server.services.image_service import ImageService
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api")
 
@@ -145,13 +148,19 @@ def api_tile_image(
     level: int = Query(default=0, ge=0, le=16),
     tile_x: int = Query(..., ge=0),
     tile_y: int = Query(..., ge=0),
-    tile_size: Optional[int] = Query(default=None, ge=64),
     orientation: str = Query(default="vertical", pattern="^(horizontal|vertical)$"),
     fmt: str = Query(default="JPEG"),
     service: ImageService = Depends(get_image_service),
 ):
     """按瓦片信息返回拼接图的分块，便于大图分片加载。"""
     try:
+        requested_orientation = orientation
+        if requested_orientation != "vertical":
+            logger.info(
+                "tile orientation=%s requested; serving vertical tiles only",
+                requested_orientation,
+            )
+        orientation = "vertical"
         payload = service.get_tile(
             surface=surface,
             seq_no=seq_no,
@@ -159,7 +168,6 @@ def api_tile_image(
             level=level,
             tile_x=tile_x,
             tile_y=tile_y,
-            tile_size=tile_size,
             orientation=orientation,
             fmt=fmt,
         )
@@ -168,7 +176,7 @@ def api_tile_image(
             "X-Tile-X": str(tile_x),
             "X-Tile-Y": str(tile_y),
             "X-Tile-Size": str(service.settings.images.frame_height),
-            "X-Tile-Orientation": orientation,
+            "X-Tile-Orientation": "vertical",
         }
         cache_ttl = int(getattr(service.settings.images, "cache_ttl_seconds", 120) or 120)
         headers["Cache-Control"] = f"public, max-age={cache_ttl}"

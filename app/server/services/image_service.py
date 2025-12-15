@@ -273,18 +273,15 @@ class ImageService:
         level: int = 0,
         tile_x: int,
         tile_y: int,
-        tile_size: Optional[int] = None,
         orientation: str = "vertical",
         fmt: str = "JPEG",
     ) -> bytes:
         view_dir = view or self.settings.images.default_view
-        base_tile_size = self.settings.images.frame_height
-        # 强制以单帧高度作为 L0级别的瓦片宽度，确保与帧尺寸配置一致
-        if tile_size is None or tile_size != base_tile_size:
-            tile_size = base_tile_size
+        tile_size = self.settings.images.frame_height
         orientation = (orientation or "vertical").lower()
         if orientation not in {"horizontal", "vertical"}:
             raise ValueError(f"Unsupported orientation '{orientation}'")
+        orientation = "vertical"
         max_level = self.disk_cache.max_level()
         if level < 0 or level > max_level:
             raise ValueError(f"Unsupported level {level} (max {max_level})")
@@ -301,7 +298,7 @@ class ImageService:
             )
             if disk is not None:
                 return disk
-        cache_key = (surface, seq_no, view_dir, orientation, level, tile_x, tile_y, tile_size, fmt)
+        cache_key = (surface, seq_no, view_dir, orientation, level, tile_x, tile_y, fmt)
         cached = self.tile_cache.get(cache_key)
         if cached is not None:
             return cached
@@ -503,7 +500,6 @@ class ImageService:
                         level=level,
                         tile_x=tile_x,
                         tile_y=tile_y,
-                        tile_size=tile_size,
                         orientation="vertical",
                         fmt="JPEG",
                     )

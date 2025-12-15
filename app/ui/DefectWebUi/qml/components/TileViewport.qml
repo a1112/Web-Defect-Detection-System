@@ -9,6 +9,7 @@ Rectangle {
     property string view: "2D"
     property int level: 0
     property int tileSize: 512
+    property int minRequestTilePixels: 256
     property int columns: 6
     property int rows: 3
     property alias zoom: content.scale
@@ -26,6 +27,7 @@ Rectangle {
 
     readonly property int tileCount: columns * rows
     property int _reloadNonce: 0
+    readonly property bool _tileRequestsEnabled: (tileSize * zoom) >= minRequestTilePixels
 
     function tileUrl(col, row) {
         const params = [
@@ -35,7 +37,6 @@ Rectangle {
             "level=" + level,
             "tile_x=" + col,
             "tile_y=" + row,
-            "tile_size=" + tileSize,
             "fmt=JPEG",
             "cache_bust=" + _reloadNonce
         ]
@@ -101,7 +102,7 @@ Rectangle {
                         asynchronous: true
                         cache: false
                         mipmap: true
-                        source: root.tileUrl(col, row)
+                        source: root._tileRequestsEnabled ? root.tileUrl(col, row) : ""
                         smooth: true
                     }
 
