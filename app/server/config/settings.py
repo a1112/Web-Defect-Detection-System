@@ -49,6 +49,8 @@ class ImageSettings(BaseModel):
     max_cached_frames: int = Field(default=64, ge=1)
     max_cached_tiles: int = Field(default=256, ge=1)
     max_cached_mosaics: int = Field(default=8, ge=1)
+    max_cached_defect_crops: int = Field(default=256, ge=1)
+    cache_ttl_seconds: int = Field(default=120, ge=1)
     mode: str = Field(default="L", description="Pillow image mode, e.g. L/RGB")
 
     @validator("top_root", "bottom_root", pre=True)

@@ -7,8 +7,8 @@ import json
 from PIL import Image
 
 from ..config.settings import ImageSettings, ServerSettings
+from ..cache import TtlLruCache
 from ..schemas import DefectRecord
-from ..utils.cache import LRUCache
 from ..utils.image_ops import (
     Box,
     encode_image,
@@ -25,9 +25,23 @@ class ImageService:
         self.defect_service = defect_service
         image_settings = settings.images
         self.mode = image_settings.mode
-        self.frame_cache = LRUCache(max_items=image_settings.max_cached_frames)
-        self.tile_cache = LRUCache(max_items=image_settings.max_cached_tiles)
-        self.mosaic_cache = LRUCache(max_items=image_settings.max_cached_mosaics)
+        ttl_seconds = image_settings.cache_ttl_seconds
+        self.frame_cache = TtlLruCache(
+            max_items=image_settings.max_cached_frames,
+            ttl_seconds=ttl_seconds,
+        )
+        self.tile_cache = TtlLruCache(
+            max_items=image_settings.max_cached_tiles,
+            ttl_seconds=ttl_seconds,
+        )
+        self.mosaic_cache = TtlLruCache(
+            max_items=image_settings.max_cached_mosaics,
+            ttl_seconds=ttl_seconds,
+        )
+        self.defect_crop_cache = TtlLruCache(
+            max_items=image_settings.max_cached_defect_crops,
+            ttl_seconds=ttl_seconds,
+        )
 
     # --------------------------------------------------------------------- #
     # Frame level helpers
@@ -109,6 +123,11 @@ class ImageService:
         height: Optional[int] = None,
         fmt: str = "JPEG",
     ) -> Tuple[bytes, DefectRecord]:
+        cache_key = (surface, defect_id, expand, width, height, fmt)
+        cached = self.defect_crop_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
         defect = self.defect_service.find_defect_by_surface(surface, defect_id)
         if not defect or defect.image_index is None:
             raise FileNotFoundError(f"Defect {defect_id} not found on {surface}")
@@ -118,7 +137,10 @@ class ImageService:
         cropped = image.crop(box)
         if width or height:
             cropped = resize_image(cropped, width=width, height=height)
-        return encode_image(cropped, fmt=fmt), defect
+        payload = encode_image(cropped, fmt=fmt)
+        result = (payload, defect)
+        self.defect_crop_cache.put(cache_key, result)
+        return result
 
     def crop_custom(
         self,
@@ -187,7 +209,7 @@ class ImageService:
             raise ValueError(f"Unsupported orientation '{orientation}'")
         cache_key = (surface, seq_no, view_dir, orientation, level, tile_x, tile_y, tile_size, fmt)
         cached = self.tile_cache.get(cache_key)
-        if cached:
+        if cached is not None:
             return cached
 
         # 基于原始帧列表按需拼接当前瓦片所需区域，而不是预先构建整幅马赛克。
@@ -307,7 +329,7 @@ class ImageService:
         path = root / str(seq_no) / view_dir / f"{image_index}.{ext}"
         key = ("frame", path.as_posix())
         cached = self.frame_cache.get(key)
-        if cached:
+        if cached is not None:
             return open_image_from_bytes(cached, mode=self.mode)
         if not path.exists():
             raise FileNotFoundError(path)
@@ -352,7 +374,7 @@ class ImageService:
     ) -> Image.Image:
         key = (surface, seq_no, view or self.settings.images.default_view, limit, skip, stride)
         cached = self.mosaic_cache.get(key)
-        if cached:
+        if cached is not None:
             return cached.copy()
         view_dir = view or self.settings.images.default_view
         frames = self._list_frame_paths(surface, seq_no, view_dir)
@@ -381,7 +403,7 @@ class ImageService:
     def _load_frame_from_path(self, path: Path) -> Image.Image:
         key = ("frame", path.as_posix())
         cached = self.frame_cache.get(key)
-        if cached:
+        if cached is not None:
             return open_image_from_bytes(cached, mode=self.mode)
         data = path.read_bytes()
         self.frame_cache.put(key, data)
