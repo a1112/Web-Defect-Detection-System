@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
 
 from app.server.api.dependencies import get_image_service
 from app.server.services.image_service import ImageService
@@ -150,6 +150,7 @@ def api_tile_image(
     tile_y: int = Query(..., ge=0),
     orientation: str = Query(default="vertical", pattern="^(horizontal|vertical)$"),
     fmt: str = Query(default="JPEG"),
+    viewer_id: Optional[str] = Header(default=None, alias="X-Viewer-Id"),
     service: ImageService = Depends(get_image_service),
 ):
     """按瓦片信息返回拼接图的分块，便于大图分片加载。"""
@@ -170,6 +171,7 @@ def api_tile_image(
             tile_y=tile_y,
             orientation=orientation,
             fmt=fmt,
+            viewer_id=viewer_id,
         )
         headers = {
             "X-Tile-Level": str(level),
@@ -183,3 +185,5 @@ def api_tile_image(
         return Response(content=payload, media_type=_image_media_type(fmt), headers=headers)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc

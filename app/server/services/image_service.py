@@ -20,6 +20,7 @@ from ..utils.image_ops import (
     resize_image,
 )
 from .defect_service import DefectService
+from .tile_prefetch import TilePrefetchManager, TileRequest
 
 logger = logging.getLogger(__name__)
 
@@ -35,10 +36,10 @@ class ImageService:
             max_items=image_settings.max_cached_frames,
             ttl_seconds=ttl_seconds,
         )
-        self.tile_cache = TtlLruCache(
-            max_items=image_settings.max_cached_tiles,
-            ttl_seconds=ttl_seconds,
-        )
+        tile_ttl_seconds = ttl_seconds
+        if image_settings.tile_prefetch_enabled:
+            tile_ttl_seconds = max(tile_ttl_seconds, int(image_settings.tile_prefetch_ttl_seconds))
+        self.tile_cache = TtlLruCache(max_items=image_settings.max_cached_tiles, ttl_seconds=tile_ttl_seconds)
         self.mosaic_cache = TtlLruCache(
             max_items=image_settings.max_cached_mosaics,
             ttl_seconds=ttl_seconds,
@@ -61,8 +62,18 @@ class ImageService:
         self._disk_cache_stop = threading.Event()
         self._disk_cache_thread_started = False
 
+        self._tile_prefetch_started = False
+        self._tile_prefetch: Optional[TilePrefetchManager] = None
+        if image_settings.tile_prefetch_enabled:
+            self._tile_prefetch = TilePrefetchManager(
+                service=self,
+                workers=int(image_settings.tile_prefetch_workers),
+                ttl_seconds=int(image_settings.tile_prefetch_ttl_seconds),
+            )
+
     def start_background_workers(self) -> None:
         image_settings = self.settings.images
+        self._start_tile_prefetch_threads()
         if not image_settings.disk_cache_enabled:
             return
         logger.info(
@@ -83,10 +94,13 @@ class ImageService:
         self._start_disk_cache_threads()
 
     def stop_background_workers(self) -> None:
+        if self._tile_prefetch is not None:
+            self._tile_prefetch.stop()
+            self._tile_prefetch_started = False
         if not self.settings.images.disk_cache_enabled:
             return
         self._disk_cache_stop.set()
-        logger.info("disk-cache worker threads 停止信号已发送")
+        logger.info("disk-cache worker threads stop requested")
 
     # --------------------------------------------------------------------- #
     # Frame level helpers
@@ -275,6 +289,34 @@ class ImageService:
         tile_y: int,
         orientation: str = "vertical",
         fmt: str = "JPEG",
+        viewer_id: Optional[str] = None,
+    ) -> bytes:
+        return self._get_tile_impl(
+            surface=surface,
+            seq_no=seq_no,
+            view=view,
+            level=level,
+            tile_x=tile_x,
+            tile_y=tile_y,
+            orientation=orientation,
+            fmt=fmt,
+            trigger_prefetch=True,
+            viewer_id=(viewer_id or ""),
+        )
+
+    def _get_tile_impl(
+        self,
+        surface: str,
+        seq_no: int,
+        *,
+        view: Optional[str],
+        level: int,
+        tile_x: int,
+        tile_y: int,
+        orientation: str,
+        fmt: str,
+        trigger_prefetch: bool,
+        viewer_id: str,
     ) -> bytes:
         view_dir = view or self.settings.images.default_view
         tile_size = self.settings.images.frame_height
@@ -282,10 +324,14 @@ class ImageService:
         if orientation not in {"horizontal", "vertical"}:
             raise ValueError(f"Unsupported orientation '{orientation}'")
         orientation = "vertical"
+        if level < 0:
+            raise ValueError("Unsupported level (must be >= 0)")
         max_level = self.disk_cache.max_level()
-        if level < 0 or level > max_level:
+        if level > max_level:
             raise ValueError(f"Unsupported level {level} (max {max_level})")
 
+        cache_key = (surface, seq_no, view_dir, orientation, level, tile_x, tile_y, fmt)
+        data: Optional[bytes] = None
         if fmt.upper() == "JPEG":
             disk = self.disk_cache.read_tile(
                 self._surface_root(surface),
@@ -297,129 +343,299 @@ class ImageService:
                 tile_y=tile_y,
             )
             if disk is not None:
-                return disk
-        cache_key = (surface, seq_no, view_dir, orientation, level, tile_x, tile_y, fmt)
-        cached = self.tile_cache.get(cache_key)
-        if cached is not None:
-            return cached
+                self.tile_cache.put(cache_key, disk)
+                data = disk
+        if data is None:
+            cached = self.tile_cache.get(cache_key)
+            if cached is not None:
+                data = cached
 
-        # 基于原始帧列表按需拼接当前瓦片所需区域，而不是预先构建整幅马赛克。
-        frames = self._list_frame_paths(surface, seq_no, view_dir)
-        if not frames:
-            raise FileNotFoundError(f"No frames found for {surface} seq={seq_no}")
+        if data is None:
+            # 基于原始帧列表按需拼接当前瓦片所需区域，而不是预先构建整幅马赛克。
+            frames = self._list_frame_paths(surface, seq_no, view_dir)
+            if not frames:
+                raise FileNotFoundError(f"No frames found for {surface} seq={seq_no}")
 
-        # 假设所有帧尺寸一致，读取首帧确定尺寸
-        first_img = self._load_frame_from_path(frames[0])
-        frame_w, frame_h = first_img.width, first_img.height
+            # 假设所有帧尺寸一致，读取首帧确定尺寸
+            first_img = self._load_frame_from_path(frames[0])
+            frame_w, frame_h = first_img.width, first_img.height
 
-        if orientation == "horizontal":
-            stripe_w = frame_h
-            stripe_h = frame_w
-            mosaic_width = stripe_w * len(frames)
-            mosaic_height = stripe_h
-        else:
-            stripe_w = frame_w
-            stripe_h = frame_h
-            mosaic_width = stripe_w
-            mosaic_height = stripe_h * len(frames)
+            if orientation == "horizontal":
+                stripe_w = frame_h
+                stripe_h = frame_w
+                mosaic_width = stripe_w * len(frames)
+                mosaic_height = stripe_h
+            else:
+                stripe_w = frame_w
+                stripe_h = frame_h
+                mosaic_width = stripe_w
+                mosaic_height = stripe_h * len(frames)
 
-        virtual_tile_size = tile_size * (2**level)
-        left0 = tile_x * virtual_tile_size
-        top0 = tile_y * virtual_tile_size
+            virtual_tile_size = tile_size * (2**level)
+            left0 = tile_x * virtual_tile_size
+            top0 = tile_y * virtual_tile_size
 
-        if left0 >= mosaic_width or top0 >= mosaic_height:
-            raise FileNotFoundError(f"Tile ({tile_x}, {tile_y}) out of bounds for {surface} seq={seq_no}")
+            if left0 >= mosaic_width or top0 >= mosaic_height:
+                raise FileNotFoundError(f"Tile ({tile_x}, {tile_y}) out of bounds for {surface} seq={seq_no}")
 
-        right0 = min(left0 + virtual_tile_size, mosaic_width)
-        bottom0 = min(top0 + virtual_tile_size, mosaic_height)
+            right0 = min(left0 + virtual_tile_size, mosaic_width)
+            bottom0 = min(top0 + virtual_tile_size, mosaic_height)
 
-        width0 = right0 - left0
-        height0 = bottom0 - top0
+            width0 = right0 - left0
+            height0 = bottom0 - top0
 
-        # 在 level=0 坐标系下构建瓦片，再按 level 缩放
-        base_tile = Image.new("RGB", (width0, height0))
+            # 在 level=0 坐标系下构建瓦片，再按 level 缩放
+            base_tile = Image.new("RGB", (width0, height0))
 
-        if orientation == "horizontal":
-            first_idx = left0 // stripe_w
-            last_idx = min(len(frames) - 1, (right0 - 1) // stripe_w)
+            if orientation == "horizontal":
+                first_idx = left0 // stripe_w
+                last_idx = min(len(frames) - 1, (right0 - 1) // stripe_w)
 
-            for idx in range(first_idx, last_idx + 1):
-                stripe_path = frames[idx]
-                src_img = self._load_frame_from_path(stripe_path)
-                rot = src_img.transpose(Image.Transpose.ROTATE_90)
+                for idx in range(first_idx, last_idx + 1):
+                    stripe_path = frames[idx]
+                    src_img = self._load_frame_from_path(stripe_path)
+                    rot = src_img.transpose(Image.Transpose.ROTATE_90)
 
-                stripe_x0 = idx * stripe_w
-                stripe_x1 = stripe_x0 + stripe_w
+                    stripe_x0 = idx * stripe_w
+                    stripe_x1 = stripe_x0 + stripe_w
 
-                xg0 = max(left0, stripe_x0)
-                xg1 = min(right0, stripe_x1)
-                if xg1 <= xg0:
-                    continue
+                    xg0 = max(left0, stripe_x0)
+                    xg1 = min(right0, stripe_x1)
+                    if xg1 <= xg0:
+                        continue
 
-                # 在单帧（旋转后）坐标系中的裁剪区域
-                x_local0 = xg0 - stripe_x0
-                x_local1 = xg1 - stripe_x0
+                    # 在单帧（旋转后）坐标系中的裁剪区域
+                    x_local0 = xg0 - stripe_x0
+                    x_local1 = xg1 - stripe_x0
 
-                # 垂直方向在所有帧上对齐
-                y_local0 = top0
-                y_local1 = bottom0
+                    # 垂直方向在所有帧上对齐
+                    y_local0 = top0
+                    y_local1 = bottom0
 
-                crop_box: Box = (int(x_local0), int(y_local0), int(x_local1), int(y_local1))
-                stripe_crop = rot.crop(crop_box)
+                    crop_box: Box = (int(x_local0), int(y_local0), int(x_local1), int(y_local1))
+                    stripe_crop = rot.crop(crop_box)
 
-                # 粘贴到当前瓦片的相对位置
-                dest_x = xg0 - left0
-                base_tile.paste(stripe_crop, (int(dest_x), 0))
-        else:
-            first_idx = top0 // stripe_h
-            last_idx = min(len(frames) - 1, (bottom0 - 1) // stripe_h)
+                    # 粘贴到当前瓦片的相对位置
+                    dest_x = xg0 - left0
+                    base_tile.paste(stripe_crop, (int(dest_x), 0))
+            else:
+                first_idx = top0 // stripe_h
+                last_idx = min(len(frames) - 1, (bottom0 - 1) // stripe_h)
 
-            for idx in range(first_idx, last_idx + 1):
-                stripe_path = frames[idx]
-                src_img = self._load_frame_from_path(stripe_path)
+                for idx in range(first_idx, last_idx + 1):
+                    stripe_path = frames[idx]
+                    src_img = self._load_frame_from_path(stripe_path)
 
-                stripe_y0 = idx * stripe_h
-                stripe_y1 = stripe_y0 + stripe_h
+                    stripe_y0 = idx * stripe_h
+                    stripe_y1 = stripe_y0 + stripe_h
 
-                yg0 = max(top0, stripe_y0)
-                yg1 = min(bottom0, stripe_y1)
-                if yg1 <= yg0:
-                    continue
+                    yg0 = max(top0, stripe_y0)
+                    yg1 = min(bottom0, stripe_y1)
+                    if yg1 <= yg0:
+                        continue
 
-                x_local0 = left0
-                x_local1 = right0
-                y_local0 = yg0 - stripe_y0
-                y_local1 = yg1 - stripe_y0
+                    x_local0 = left0
+                    x_local1 = right0
+                    y_local0 = yg0 - stripe_y0
+                    y_local1 = yg1 - stripe_y0
 
-                crop_box = (int(x_local0), int(y_local0), int(x_local1), int(y_local1))
-                stripe_crop = src_img.crop(crop_box)
+                    crop_box = (int(x_local0), int(y_local0), int(x_local1), int(y_local1))
+                    stripe_crop = src_img.crop(crop_box)
 
-                dest_y = yg0 - top0
-                base_tile.paste(stripe_crop, (0, int(dest_y)))
+                    dest_y = yg0 - top0
+                    base_tile.paste(stripe_crop, (0, int(dest_y)))
 
-        # 对 level>0 进行缩放，得到最终瓦片图像尺寸
-        if level > 0:
-            scale = 1 / (2**level)
-            target_w = max(1, int(round(width0 * scale)))
-            target_h = max(1, int(round(height0 * scale)))
-            tile_img = base_tile.resize((target_w, target_h), Image.Resampling.BILINEAR)
-        else:
-            tile_img = base_tile
+            # 对 level>0 进行缩放，得到最终瓦片图像尺寸
+            if level > 0:
+                scale = 1 / (2**level)
+                target_w = max(1, int(round(width0 * scale)))
+                target_h = max(1, int(round(height0 * scale)))
+                tile_img = base_tile.resize((target_w, target_h), Image.Resampling.BILINEAR)
+            else:
+                tile_img = base_tile
 
-        data = encode_image(tile_img, fmt=fmt)
-        self.tile_cache.put(cache_key, data)
-        if fmt.upper() == "JPEG":
-            self.disk_cache.write_tile(
-                self._surface_root(surface),
-                seq_no,
+            data = encode_image(tile_img, fmt=fmt)
+            self.tile_cache.put(cache_key, data)
+            if fmt.upper() == "JPEG":
+                self.disk_cache.write_tile(
+                    self._surface_root(surface),
+                    seq_no,
+                    view=view_dir,
+                    level=level,
+                    orientation=orientation,
+                    tile_x=tile_x,
+                    tile_y=tile_y,
+                    payload=data,
+                )
+
+        if trigger_prefetch:
+            self._schedule_tile_prefetch(
+                viewer_id=viewer_id,
+                surface=surface,
+                seq_no=seq_no,
                 view=view_dir,
                 level=level,
-                orientation=orientation,
                 tile_x=tile_x,
                 tile_y=tile_y,
-                payload=data,
             )
         return data
+
+    def _start_tile_prefetch_threads(self) -> None:
+        if self._tile_prefetch_started:
+            return
+        if self._tile_prefetch is None:
+            return
+        self._tile_prefetch.start()
+        self._tile_prefetch_started = True
+
+    def _schedule_tile_prefetch(
+        self,
+        *,
+        viewer_id: str,
+        surface: str,
+        seq_no: int,
+        view: str,
+        level: int,
+        tile_x: int,
+        tile_y: int,
+    ) -> None:
+        manager = self._tile_prefetch
+        if manager is None:
+            return
+        if not self._tile_prefetch_started:
+            manager.start()
+            self._tile_prefetch_started = True
+
+        max_level = self.disk_cache.max_level()
+        settings = self.settings.images
+        viewer_id = (viewer_id or "").strip()
+        if viewer_id and settings.tile_prefetch_clear_pending_on_seq_change:
+            manager.notify_seq_request(
+                viewer_id=viewer_id,
+                seq_no=seq_no,
+                clear_pending=True,
+            )
+
+        if not viewer_id:
+            return
+
+        # Same-level adjacent tiles (configurable, default 1).
+        neighbor_count = int(settings.tile_prefetch_adjacent_tile_count)
+        if neighbor_count > 0:
+            offsets_by_name: dict[str, tuple[int, int]] = {
+                "right": (1, 0),
+                "left": (-1, 0),
+                "down": (0, 1),
+                "up": (0, -1),
+                "down_right": (1, 1),
+                "down_left": (-1, 1),
+                "up_right": (1, -1),
+                "up_left": (-1, -1),
+            }
+            picked = 0
+            for name in settings.tile_prefetch_adjacent_tile_order:
+                dx, dy = offsets_by_name.get(str(name).lower(), (0, 0))
+                if dx == 0 and dy == 0:
+                    continue
+                nx = tile_x + dx
+                ny = tile_y + dy
+                if nx < 0 or ny < 0:
+                    continue
+                manager.enqueue_tile(
+                    TileRequest(
+                        viewer_id=viewer_id,
+                        surface=surface,
+                        seq_no=seq_no,
+                        view=view,
+                        level=level,
+                        tile_x=nx,
+                        tile_y=ny,
+                    ),
+                    priority=1,
+                )
+                picked += 1
+                if picked >= neighbor_count:
+                    break
+
+        # Cross-level prefetch (optional).
+        if settings.tile_prefetch_cross_level_enabled:
+            if level > 0:
+                child_level = level - 1
+                base_x = tile_x * 2
+                base_y = tile_y * 2
+                for dx in (0, 1):
+                    for dy in (0, 1):
+                        manager.enqueue_tile(
+                            TileRequest(
+                                viewer_id=viewer_id,
+                                surface=surface,
+                                seq_no=seq_no,
+                                view=view,
+                                level=child_level,
+                                tile_x=base_x + dx,
+                                tile_y=base_y + dy,
+                            ),
+                            priority=1,
+                        )
+            if level < max_level:
+                manager.enqueue_tile(
+                    TileRequest(
+                        viewer_id=viewer_id,
+                        surface=surface,
+                        seq_no=seq_no,
+                        view=view,
+                        level=level + 1,
+                        tile_x=tile_x // 2,
+                        tile_y=tile_y // 2,
+                    ),
+                    priority=1,
+                )
+
+        # Adjacent seq_no warmup (optional).
+        if settings.tile_prefetch_adjacent_seq_enabled:
+            warm_levels: list[tuple[int, int]] = []
+            if max_level >= 4 and settings.tile_prefetch_adjacent_seq_level4_count > 0:
+                warm_levels.append((4, int(settings.tile_prefetch_adjacent_seq_level4_count)))
+            if max_level >= 3 and settings.tile_prefetch_adjacent_seq_level3_count > 0:
+                warm_levels.append((3, int(settings.tile_prefetch_adjacent_seq_level3_count)))
+            if warm_levels:
+                manager.maybe_enqueue_adjacent_warm(
+                    viewer_id=viewer_id,
+                    surface=surface,
+                    seq_no=seq_no,
+                    view=view,
+                    warm_levels=warm_levels,
+                    priority=2,
+                )
+
+    def _first_tile_coords(
+        self,
+        *,
+        surface: str,
+        seq_no: int,
+        view: str,
+        level: int,
+        count: int,
+    ) -> list[tuple[int, int]]:
+        tile_size = self.settings.images.frame_height
+        frames = self._list_frame_paths(surface, seq_no, view)
+        if not frames:
+            return []
+        first_img = self._load_frame_from_path(frames[0])
+        mosaic_width = first_img.width
+        mosaic_height = first_img.height * len(frames)
+
+        virtual_tile_size = tile_size * (2**level)
+        tiles_x = max(1, int(math.ceil(mosaic_width / virtual_tile_size)))
+        tiles_y = max(1, int(math.ceil(mosaic_height / virtual_tile_size)))
+
+        coords: list[tuple[int, int]] = []
+        for y in range(tiles_y):
+            for x in range(tiles_x):
+                coords.append((x, y))
+                if len(coords) >= count:
+                    return coords
+        return coords
 
     # --------------------------------------------------------------------- #
     # Disk cache workers

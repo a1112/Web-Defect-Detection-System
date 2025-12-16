@@ -67,12 +67,17 @@ def api_steel_meta(
             )
         except FileNotFoundError:
             continue
+        tile_size = image_service.settings.images.frame_height
+        max_level = 0
+        if tile_size > 0 and image_width > tile_size:
+            max_level = int(math.ceil(math.log(image_width / tile_size, 2)))
         surface_images.append(
             SurfaceImageInfo(
                 surface=surf,  # type: ignore[arg-type]
                 frame_count=frame_count,
                 image_width=image_width,
                 image_height=image_height,
+                max_level=max_level,
             )
         )
 

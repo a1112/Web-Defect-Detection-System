@@ -1,9 +1,22 @@
 <RCC>
     <qresource prefix="/qml">
+        <file>App.qml</file>
         <file>main.qml</file>
+        <file>js/api.js</file>
+        <file>js/http.js</file>
+        <file>js/orientation.js</file>
+        <file>store/AppStore.qml</file>
+        <file>store/qmldir</file>
+        <file>pages/DefectsPage.qml</file>
+        <file>pages/ImagesPage.qml</file>
+        <file>pages/SettingsPage.qml</file>
+        <file>components/DefectListPanel.qml</file>
         <file>components/ImagePreview.qml</file>
+        <file>components/NavRail.qml</file>
         <file>components/PanelHeader.qml</file>
         <file>components/SideRail.qml</file>
+        <file>components/PlatesPanel.qml</file>
+        <file>components/TileViewer.qml</file>
         <file>components/TileViewport.qml</file>
     </qresource>
 </RCC>

@@ -51,6 +51,17 @@ class ImageSettings(BaseModel):
     max_cached_mosaics: int = Field(default=8, ge=1)
     max_cached_defect_crops: int = Field(default=256, ge=1)
     cache_ttl_seconds: int = Field(default=120, ge=1)
+
+    tile_prefetch_enabled: bool = Field(default=True)
+    tile_prefetch_workers: int = Field(default=2, ge=1)
+    tile_prefetch_ttl_seconds: int = Field(default=300, ge=1)
+    tile_prefetch_clear_pending_on_seq_change: bool = Field(default=True)
+    tile_prefetch_adjacent_tile_count: int = Field(default=1, ge=0, le=8)
+    tile_prefetch_adjacent_tile_order: list[str] = Field(default_factory=lambda: ["right", "left", "down", "up"])
+    tile_prefetch_cross_level_enabled: bool = Field(default=True)
+    tile_prefetch_adjacent_seq_enabled: bool = Field(default=True)
+    tile_prefetch_adjacent_seq_level4_count: int = Field(default=10, ge=0, le=200)
+    tile_prefetch_adjacent_seq_level3_count: int = Field(default=20, ge=0, le=200)
     disk_cache_enabled: bool = Field(default=False)
     disk_cache_max_tiles: int = Field(default=2000, ge=1)
     disk_cache_max_defects: int = Field(default=1000, ge=1)
@@ -72,6 +83,38 @@ class ImageSettings(BaseModel):
         if isinstance(frame_height, int) and frame_height > 0:
             return frame_height
         return 1024
+
+    @validator("tile_prefetch_adjacent_tile_order", pre=True)
+    def _coerce_adjacent_order(cls, value):
+        if value is None:
+            return ["right", "left", "down", "up"]
+        if isinstance(value, str):
+            # Support comma-separated strings in JSON/env overrides.
+            return [part.strip() for part in value.split(",") if part.strip()]
+        return value
+
+    @validator("tile_prefetch_adjacent_tile_order")
+    def _validate_adjacent_order(cls, value: list[str]) -> list[str]:
+        allowed = {
+            "right",
+            "left",
+            "down",
+            "up",
+            "down_right",
+            "down_left",
+            "up_right",
+            "up_left",
+        }
+        normalized: list[str] = []
+        for item in value or []:
+            key = str(item).strip().lower()
+            if not key:
+                continue
+            if key not in allowed:
+                raise ValueError(f"Unsupported tile_prefetch_adjacent_tile_order entry '{item}'")
+            if key not in normalized:
+                normalized.append(key)
+        return normalized
 
 
 class ServerSettings(BaseModel):

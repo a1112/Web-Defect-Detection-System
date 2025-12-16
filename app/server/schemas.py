@@ -122,6 +122,7 @@ class SurfaceImageInfo(BaseModel):
     frame_count: int = Field(description="该表面可用帧图像数量")
     image_width: int = Field(description="单帧图像宽度（像素）")
     image_height: int = Field(description="单帧图像高度（像素）")
+    max_level: int = Field(description="此序列在当前瓦片规则下支持的最大瓦片级别")
 
 
 class TileDescriptor(BaseModel):
