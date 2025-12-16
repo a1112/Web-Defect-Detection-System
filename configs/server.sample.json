@@ -29,6 +29,8 @@
     "tile_prefetch_adjacent_seq_enabled": true,
     "tile_prefetch_adjacent_seq_level4_count": 10,
     "tile_prefetch_adjacent_seq_level3_count": 20,
+    "tile_prefetch_log_enabled": true,
+    "tile_prefetch_log_detail": "summary",
     "disk_cache_enabled": false
   }
 }

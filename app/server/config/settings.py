@@ -62,6 +62,8 @@ class ImageSettings(BaseModel):
     tile_prefetch_adjacent_seq_enabled: bool = Field(default=True)
     tile_prefetch_adjacent_seq_level4_count: int = Field(default=10, ge=0, le=200)
     tile_prefetch_adjacent_seq_level3_count: int = Field(default=20, ge=0, le=200)
+    tile_prefetch_log_enabled: bool = Field(default=True)
+    tile_prefetch_log_detail: Literal["summary", "task"] = Field(default="summary")
     disk_cache_enabled: bool = Field(default=False)
     disk_cache_max_tiles: int = Field(default=2000, ge=1)
     disk_cache_max_defects: int = Field(default=1000, ge=1)

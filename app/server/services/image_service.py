@@ -23,6 +23,7 @@ from .defect_service import DefectService
 from .tile_prefetch import TilePrefetchManager, TileRequest
 
 logger = logging.getLogger(__name__)
+prefetch_logger = logging.getLogger("uvicorn.error")
 
 
 class ImageService:
@@ -69,6 +70,8 @@ class ImageService:
                 service=self,
                 workers=int(image_settings.tile_prefetch_workers),
                 ttl_seconds=int(image_settings.tile_prefetch_ttl_seconds),
+                log_enabled=bool(image_settings.tile_prefetch_log_enabled),
+                log_detail=str(image_settings.tile_prefetch_log_detail),
             )
 
     def start_background_workers(self) -> None:
@@ -519,6 +522,9 @@ class ImageService:
         if not viewer_id:
             return
 
+        scheduled: list[tuple[int, int, int]] = []
+        seq_warm: list[tuple[int, int, int]] = []
+
         # Same-level adjacent tiles (configurable, default 1).
         neighbor_count = int(settings.tile_prefetch_adjacent_tile_count)
         if neighbor_count > 0:
@@ -553,6 +559,7 @@ class ImageService:
                     ),
                     priority=1,
                 )
+                scheduled.append((level, nx, ny))
                 picked += 1
                 if picked >= neighbor_count:
                     break
@@ -577,6 +584,7 @@ class ImageService:
                             ),
                             priority=1,
                         )
+                        scheduled.append((child_level, base_x + dx, base_y + dy))
             if level < max_level:
                 manager.enqueue_tile(
                     TileRequest(
@@ -590,6 +598,7 @@ class ImageService:
                     ),
                     priority=1,
                 )
+                scheduled.append((level + 1, tile_x // 2, tile_y // 2))
 
         # Adjacent seq_no warmup (optional).
         if settings.tile_prefetch_adjacent_seq_enabled:
@@ -599,6 +608,10 @@ class ImageService:
             if max_level >= 3 and settings.tile_prefetch_adjacent_seq_level3_count > 0:
                 warm_levels.append((3, int(settings.tile_prefetch_adjacent_seq_level3_count)))
             if warm_levels:
+                for neighbor in (seq_no - 1, seq_no + 1):
+                    if neighbor >= 0:
+                        for lvl, cnt in warm_levels:
+                            seq_warm.append((neighbor, lvl, cnt))
                 manager.maybe_enqueue_adjacent_warm(
                     viewer_id=viewer_id,
                     surface=surface,
@@ -607,6 +620,20 @@ class ImageService:
                     warm_levels=warm_levels,
                     priority=2,
                 )
+
+        if settings.tile_prefetch_log_enabled and settings.tile_prefetch_log_detail == "summary":
+            prefetch_logger.info(
+                "tile-prefetch warmup viewer=%s %s seq=%s view=%s req_level=%s x=%s y=%s tiles=%s seq_warm=%s",
+                viewer_id,
+                surface,
+                seq_no,
+                view,
+                level,
+                tile_x,
+                tile_y,
+                scheduled,
+                seq_warm,
+            )
 
     def _first_tile_coords(
         self,

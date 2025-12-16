@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
 
 from app.server.api.dependencies import get_image_service
 from app.server.services.image_service import ImageService
@@ -142,6 +142,7 @@ def api_mosaic_image(
 
 @router.get("/images/tile")
 def api_tile_image(
+    request: Request,
     surface: str = Query(..., pattern="^(top|bottom)$"),
     seq_no: int = Query(...),
     view: Optional[str] = Query(default=None),
@@ -162,6 +163,13 @@ def api_tile_image(
                 requested_orientation,
             )
         orientation = "vertical"
+        resolved_viewer_id = viewer_id
+        if not resolved_viewer_id:
+            forwarded = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+            if forwarded:
+                resolved_viewer_id = forwarded
+            elif request.client:
+                resolved_viewer_id = request.client.host
         payload = service.get_tile(
             surface=surface,
             seq_no=seq_no,
@@ -171,7 +179,7 @@ def api_tile_image(
             tile_y=tile_y,
             orientation=orientation,
             fmt=fmt,
-            viewer_id=viewer_id,
+            viewer_id=resolved_viewer_id,
         )
         headers = {
             "X-Tile-Level": str(level),
