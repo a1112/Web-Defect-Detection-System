@@ -53,6 +53,8 @@ class ImageService:
 
         self.disk_cache = DiskImageCache(
             enabled=image_settings.disk_cache_enabled,
+            read_only=self.test_mode,
+            flat_layout=False,
             max_tiles=image_settings.disk_cache_max_tiles,
             max_defects=image_settings.disk_cache_max_defects,
             defect_expand=32,
@@ -78,7 +80,7 @@ class ImageService:
     def start_background_workers(self) -> None:
         image_settings = self.settings.images
         self._start_tile_prefetch_threads()
-        if not image_settings.disk_cache_enabled:
+        if not image_settings.disk_cache_enabled or self.disk_cache.read_only:
             return
         logger.info(
             "disk-cache enabled view=%s tile_size=%s max_level=%s max_tiles=%s max_defects=%s",
@@ -143,24 +145,28 @@ class ImageService:
         # small 实例下，record.json 目前仍保存在 2D 目录，因此需要优先从当前视图读取，
         # 如果没有再回退到 2D 目录。
         surface_root = self._surface_root(surface)
+        seq_no_fs = self._resolve_seq_no_for_fs(surface_root, seq_no)
         candidate_views: list[str] = [view_dir]
         if view_dir.lower() != "2d":
             candidate_views.append("2D")
 
         frame_count: Optional[int] = None
         for candidate_view in candidate_views:
-            record_dir = surface_root / str(seq_no) / candidate_view
-            record_path = record_dir / "record.json"
-            if not record_path.exists():
-                continue
-            try:
-                payload = json.loads(record_path.read_text(encoding="utf-8"))
-                raw = payload.get("imgNum") or payload.get("img_num")
-                if isinstance(raw, int) and raw > 0:
-                    frame_count = raw
-                    break
-            except Exception:
-                frame_count = None
+            record_dirs = [surface_root / str(seq_no_fs) / candidate_view]
+            for record_dir in record_dirs:
+                record_path = record_dir / "record.json"
+                if not record_path.exists():
+                    continue
+                try:
+                    payload = json.loads(record_path.read_text(encoding="utf-8"))
+                    raw = payload.get("imgNum") or payload.get("img_num")
+                    if isinstance(raw, int) and raw > 0:
+                        frame_count = raw
+                        break
+                except Exception:
+                    frame_count = None
+            if frame_count is not None:
+                break
 
         # 回退：通过扫描帧文件获取数量
         if frame_count is None:
@@ -201,9 +207,11 @@ class ImageService:
             and height is None
             and expand == self.disk_cache.defect_expand
         ):
+            surface_root = self._surface_root(surface)
+            seq_no_fs = self._resolve_seq_no_for_fs(surface_root, defect.seq_no)
             disk = self.disk_cache.read_defect(
-                self._surface_root(surface),
-                defect.seq_no,
+                surface_root,
+                seq_no_fs,
                 view=None,
                 surface=surface,
                 defect_id=defect_id,
@@ -229,7 +237,7 @@ class ImageService:
         ):
             self.disk_cache.write_defect(
                 self._surface_root(surface),
-                defect.seq_no,
+                self._resolve_seq_no_for_fs(self._surface_root(surface), defect.seq_no),
                 view=None,
                 surface=surface,
                 defect_id=defect_id,
@@ -324,6 +332,8 @@ class ImageService:
     ) -> bytes:
         view_dir = view or self.settings.images.default_view
         tile_size = self.settings.images.frame_height
+        surface_root = self._surface_root(surface)
+        seq_no_fs = self._resolve_seq_no_for_fs(surface_root, seq_no)
         orientation = (orientation or "vertical").lower()
         if orientation not in {"horizontal", "vertical"}:
             raise ValueError(f"Unsupported orientation '{orientation}'")
@@ -338,8 +348,8 @@ class ImageService:
         data: Optional[bytes] = None
         if fmt.upper() == "JPEG":
             disk = self.disk_cache.read_tile(
-                self._surface_root(surface),
-                seq_no,
+                surface_root,
+                seq_no_fs,
                 view=view_dir,
                 level=level,
                 orientation=orientation,
@@ -471,9 +481,9 @@ class ImageService:
             data = encode_image(tile_img, fmt=fmt)
             self.tile_cache.put(cache_key, data)
             if fmt.upper() == "JPEG":
-                self.disk_cache.write_tile(
-                    self._surface_root(surface),
-                    seq_no,
+                    self.disk_cache.write_tile(
+                    surface_root,
+                    seq_no_fs,
                     view=view_dir,
                     level=level,
                     orientation=orientation,
@@ -486,7 +496,7 @@ class ImageService:
             self._schedule_tile_prefetch(
                 viewer_id=viewer_id,
                 surface=surface,
-                seq_no=seq_no,
+                seq_no=seq_no_fs,
                 view=view_dir,
                 level=level,
                 tile_x=tile_x,
@@ -788,7 +798,8 @@ class ImageService:
         view_dir = view or self.settings.images.default_view
         ext = self.settings.images.file_extension
         root = self._surface_root(surface)
-        path = self._resolve_frame_path(root, seq_no, view_dir, image_index, ext)
+        seq_no_fs = self._resolve_seq_no_for_fs(root, seq_no)
+        path = self._resolve_frame_path(root, seq_no_fs, view_dir, image_index, ext)
         key = ("frame", path.as_posix())
         cached = self.frame_cache.get(key)
         if cached is not None:
@@ -810,9 +821,23 @@ class ImageService:
     @staticmethod
     def _resolve_frame_path(root: Path, seq_no: int, view_dir: str, image_index: int, ext: str) -> Path:
         candidate = root / str(seq_no) / view_dir / f"{image_index}.{ext}"
-        if candidate.exists():
-            return candidate
-        return root / view_dir / f"{image_index}.{ext}"
+        return candidate
+
+    def _resolve_seq_no_for_fs(self, root: Path, seq_no: int) -> int:
+        """
+        Resolve the on-disk seq directory.
+
+        Normal layout: {root}/{seq_no}/{view}/{index}.jpg
+
+        In test mode: if {root}/{seq_no} is missing, fallback to {root}/1
+        (behaves like "copied from 1", without writing anything).
+        """
+        seq_dir = root / str(seq_no)
+        if seq_dir.exists():
+            return seq_no
+        if self.test_mode and (root / "1").exists():
+            return 1
+        return seq_no
 
     def _surface_root(self, surface: str) -> Path:
         surface = surface.lower()
@@ -824,16 +849,12 @@ class ImageService:
 
     def _list_frame_paths(self, surface: str, seq_no: int, view: str) -> List[Path]:
         root = self._surface_root(surface)
-        candidates = [root / str(seq_no) / view, root / view, root]
-        folder: Optional[Path] = None
-        for candidate in candidates:
-            if candidate.exists():
-                folder = candidate
-                break
-        if folder is None:
+        seq_no_fs = self._resolve_seq_no_for_fs(root, seq_no)
+        folder = root / str(seq_no_fs) / view
+        if not folder.exists():
             if self.test_mode:
                 return []
-            raise FileNotFoundError(candidates[0])
+            raise FileNotFoundError(folder)
         ext = self.settings.images.file_extension
         files = list(folder.glob(f"*.{ext}"))
         files.sort(key=self._frame_sort_key)

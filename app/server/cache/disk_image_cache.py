@@ -33,6 +33,8 @@ class DiskImageCache:
         self,
         *,
         enabled: bool,
+        read_only: bool = False,
+        flat_layout: bool = False,
         max_tiles: int,
         max_defects: int,
         defect_expand: int,
@@ -42,6 +44,8 @@ class DiskImageCache:
         view_name: str,
     ):
         self.enabled = enabled
+        self.read_only = read_only
+        self.flat_layout = flat_layout
         self.max_tiles = max_tiles
         self.max_defects = max_defects
         self.defect_expand = defect_expand
@@ -61,6 +65,8 @@ class DiskImageCache:
 
     def cache_dir(self, surface_root: Path, seq_no: int, view: Optional[str]) -> Path:
         view_dir = view or self.view_name
+        if self.flat_layout:
+            return surface_root / "cache" / view_dir
         return surface_root / str(seq_no) / "cache" / view_dir
 
     def tile_path(
@@ -128,7 +134,7 @@ class DiskImageCache:
         tile_y: int,
         payload: bytes,
     ) -> None:
-        if not self.enabled:
+        if not self.enabled or self.read_only:
             return
         path = self.tile_path(
             surface_root,
@@ -169,7 +175,7 @@ class DiskImageCache:
         defect_id: int,
         payload: bytes,
     ) -> None:
-        if not self.enabled:
+        if not self.enabled or self.read_only:
             return
         path = self.defect_path(surface_root, seq_no, view=view, surface=surface, defect_id=defect_id)
         self._atomic_write(path, payload)
@@ -182,7 +188,7 @@ class DiskImageCache:
         *,
         view: Optional[str],
     ) -> None:
-        if not self.enabled:
+        if not self.enabled or self.read_only:
             return
         base = self.cache_dir(surface_root, seq_no, view)
         tile_dir = base / "tile"
