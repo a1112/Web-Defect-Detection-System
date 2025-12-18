@@ -4,7 +4,7 @@ import math
 from fastapi import APIRouter, HTTPException, Depends
 
 from app.server.api.utils import get_defect_class_payload
-from app.server.config.settings import ServerSettings
+from app.server import deps
 from app.server.api.dependencies import get_image_service
 from app.server.schemas import SurfaceImageInfo
 from app.server.services.image_service import ImageService
@@ -25,7 +25,7 @@ def api_meta():
     except FileNotFoundError as exc:
         raise HTTPException(status_code=500, detail="DefectClass.json not found") from exc
 
-    settings = ServerSettings.load()
+    settings = deps.get_settings()
     images = settings.images
 
     # 瓦片层级与尺寸从配置文件中读取

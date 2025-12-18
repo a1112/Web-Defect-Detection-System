@@ -16,19 +16,29 @@ LEGACY_CONFIG_DIR = Path(__file__).resolve().parent
 
 
 class DatabaseSettings(BaseModel):
-    drive: Literal["mysql", "sqlserver"] = "mysql"
+    drive: Literal["mysql", "sqlserver", "sqlite"] = "mysql"
     host: str = Field(default="127.0.0.1")
     port: Optional[int] = None
     user: str = Field(default="root")
     password: str = Field(default="nercar")
     charset: str = Field(default="utf8")
     database_type: str = Field(default="ncdplate")
+    sqlite_dir: Optional[Path] = Field(
+        default=None,
+        description="Directory containing SQLite backups named like {database}.db",
+    )
 
     @property
     def resolved_port(self) -> int:
         if self.port:
             return self.port
         return 1433 if self.drive == "sqlserver" else 3306
+
+    @validator("sqlite_dir", pre=True)
+    def _coerce_sqlite_dir(cls, value: str | Path | None) -> Path | None:
+        if value is None or value == "":
+            return None
+        return Path(value)
 
 
 class ImageSettings(BaseModel):
@@ -122,6 +132,14 @@ class ImageSettings(BaseModel):
 class ServerSettings(BaseModel):
     database: DatabaseSettings
     images: ImageSettings
+    test_mode: bool = Field(default=False, description="Enable local TestData-backed mode (SQLite + local images).")
+    testdata_dir: Optional[Path] = Field(default=None, description="Path to TestData directory used in test mode.")
+
+    @validator("testdata_dir", pre=True)
+    def _coerce_testdata_dir(cls, value: str | Path | None) -> Path | None:
+        if value is None or value == "":
+            return None
+        return Path(value)
 
     @classmethod
     def load(cls, explicit_path: str | Path | None = None) -> "ServerSettings":

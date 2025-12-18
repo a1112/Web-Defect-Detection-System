@@ -25,11 +25,21 @@ def _build_url(settings: DatabaseSettings, db_name: str) -> str:
     if drive == "sqlserver":
         # Using pymssql driver string
         return f"mssql+pymssql://{user}:{password}@{host}:{port}/{db_name}"
+    if drive == "sqlite":
+        if not settings.sqlite_dir:
+            raise ValueError("sqlite_dir must be provided when drive=sqlite")
+        sqlite_path = (settings.sqlite_dir / f"{db_name}.db").resolve()
+        # SQLAlchemy expects forward slashes in SQLite URLs on Windows.
+        return f"sqlite+pysqlite:///{sqlite_path.as_posix()}"
     raise ValueError(f"Unsupported database driver: {drive}")
 
 
 def _create_sessionmaker(url: str):
-    engine = create_engine(url, pool_pre_ping=True, future=True)
+    connect_args = {}
+    if url.startswith("sqlite"):
+        # FastAPI may use threadpool workers; allow SQLite connections across threads.
+        connect_args = {"check_same_thread": False}
+    engine = create_engine(url, pool_pre_ping=True, future=True, connect_args=connect_args)
     return sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
 
 
