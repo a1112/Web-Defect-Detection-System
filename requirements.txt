@@ -6,3 +6,4 @@ cryptography
 fastapi
 Pillow
 requests
+uvicorn
