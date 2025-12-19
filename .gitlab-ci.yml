@@ -1,0 +1,53 @@
+stages:
+  - deploy
+
+default:
+  image: alpine:3.20
+  before_script:
+    - apk add --no-cache openssh-client bash
+    - mkdir -p ~/.ssh
+    - chmod 700 ~/.ssh
+    # SSH private key should be stored in GitLab CI/CD Variables as masked/protected:
+    #   DEPLOY_SSH_PRIVATE_KEY
+    - |
+      if [ -z "${DEPLOY_SSH_PRIVATE_KEY:-}" ]; then
+        echo "[error] DEPLOY_SSH_PRIVATE_KEY is not set"
+        exit 1
+      fi
+      printf '%s\n' "$DEPLOY_SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
+      chmod 600 ~/.ssh/id_rsa
+    # Prefer explicit known_hosts to avoid MITM; fallback to ssh-keyscan if not provided.
+    #   SSH_KNOWN_HOSTS should contain lines like: "host ssh-ed25519 AAAA..."
+    - |
+      if [ -n "${SSH_KNOWN_HOSTS:-}" ]; then
+        printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+      else
+        : "${DEPLOY_HOST:?DEPLOY_HOST is required}"
+        DEPLOY_PORT="${DEPLOY_PORT:-22}"
+        ssh-keyscan -p "$DEPLOY_PORT" -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+      fi
+      chmod 600 ~/.ssh/known_hosts
+
+deploy:prod:
+  stage: deploy
+  environment:
+    name: production
+  resource_group: production
+  variables:
+    DEPLOY_PORT: "22"
+    DEPLOY_BRANCH: "main"
+    DEPLOY_REPO_DIR: "/opt/defect-api"
+    # Space-separated systemd unit names, e.g.:
+    #   defect-api-2d.service defect-api-small.service
+    DEPLOY_SYSTEMD_SERVICES: "defect-api.service"
+    DEPLOY_USE_SUDO: "true"
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      when: on_success
+    - when: never
+  script:
+    - : "${DEPLOY_HOST:?DEPLOY_HOST is required}"
+    - : "${DEPLOY_USER:?DEPLOY_USER is required}"
+    - |
+      ssh -p "${DEPLOY_PORT}" "${DEPLOY_USER}@${DEPLOY_HOST}" \
+        "DEPLOY_BRANCH='${DEPLOY_BRANCH}' REPO_DIR='${DEPLOY_REPO_DIR}' DEPLOY_SYSTEMD_SERVICES='${DEPLOY_SYSTEMD_SERVICES}' DEPLOY_USE_SUDO='${DEPLOY_USE_SUDO}' bash '${DEPLOY_REPO_DIR}/deploy_bare.sh'"
