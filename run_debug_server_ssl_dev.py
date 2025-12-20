@@ -23,8 +23,8 @@ CONFIG_NEEDS = [
     ("DEFECT_DEBUG_TEST_SSL_SMALL", REPO_ROOT / "configs" / "server_small.json", 8230),
 ]
 
-DEFAULT_CERT = REPO_ROOT / "app" / "server" / "certs" / "server.crt"
-DEFAULT_KEY = REPO_ROOT / "app" / "server" / "certs" / "server.key"
+DEFAULT_CERT = REPO_ROOT / "certs" / "bkvision.online" / "bkvision.online.crt"
+DEFAULT_KEY = REPO_ROOT / "certs" / "bkvision.online" / "bkvision.online.key"
 
 
 def ensure_testdata() -> Path:
@@ -59,7 +59,7 @@ def resolve_ssl_files() -> tuple[Path, Path]:
         print("[error] SSL cert/key not found.")
         print(f"[error] cert: {cert}")
         print(f"[error] key : {key}")
-        print("[hint] Set DEFECT_SSL_CERT / DEFECT_SSL_KEY env vars, or add certs under app/server/certs/.")
+        print("[hint] Set DEFECT_SSL_CERT / DEFECT_SSL_KEY env vars, or add certs under ./certs/.")
         raise SystemExit(1)
     return cert, key
 
@@ -122,4 +122,3 @@ def main() -> None:
 if __name__ == "__main__":
     mp.freeze_support()
     main()
-
