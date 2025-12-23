@@ -1,7 +1,7 @@
 {
   "database": {
     "drive": "mysql",
-    "host": "127.0.0.1",
+    "host": "{ip}",
     "port": 3306,
     "user": "root",
     "password": "nercar",
@@ -9,8 +9,8 @@
     "database_type": "ncdplate"
   },
   "images": {
-    "top_root": "\\\\127.0.0.1\\imgsrc1",
-    "bottom_root": "\\\\127.0.0.1\\imgsrc2",
+    "top_root": "\\\\{ip}\\imgsrc1",
+    "bottom_root": "\\\\{ip}\\imgsrc2",
     "default_view": "small",
     "file_extension": "jpg",
     "frame_width": 8192,

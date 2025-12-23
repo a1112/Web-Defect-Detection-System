@@ -120,6 +120,8 @@ def build_config_for_line(
     ip = line.get("ip") or database.get("host")
     if ip and not database.get("host"):
         database["host"] = ip
+    if ip and isinstance(database.get("host"), str):
+        database["host"] = _apply_ip_format(database["host"], ip)
     images = {key: _apply_ip_format(value, ip) for key, value in images.items()}
 
     payload["database"] = database
