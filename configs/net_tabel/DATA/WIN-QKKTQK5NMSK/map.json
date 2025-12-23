@@ -1,0 +1,131 @@
+{
+  "defaults": {
+    "database": {
+      "drive": "mysql",
+      "port": 3306,
+      "user": "root",
+      "password": "nercar",
+      "charset": "utf8",
+      "database_type": "ncdplate"
+    },
+    "images": {
+      "top_root": "\\\\{ip}\\imgsrc1",
+      "bottom_root": "\\\\{ip}\\imgsrc2",
+      "default_view": "2D",
+      "file_extension": "jpg",
+      "frame_width": 16384,
+      "frame_height": 1024,
+      "mode": "L"
+    }
+  },
+  "lines": [
+    {
+      "name": "1#横切线",
+      "mode": "direct",
+      "ip": "172.25.2.10",
+      "port": 8200
+    },
+    {
+      "name": "10#生产线",
+      "mode": "direct",
+      "ip": "172.25.2.99",
+      "port": 8201
+    },
+    {
+      "name": "11#生产线",
+      "mode": "direct",
+      "ip": "172.25.2.98",
+      "port": 8202
+    },
+    {
+      "name": "11#矫直线",
+      "mode": "direct",
+      "ip": "172.25.2.98",
+      "port": 8203
+    },
+    {
+      "name": "12#生产线",
+      "mode": "direct",
+      "ip": "172.25.2.114",
+      "port": 8204
+    },
+    {
+      "name": "12#矫直线",
+      "mode": "direct",
+      "ip": "172.25.2.114",
+      "port": 8205
+    },
+    {
+      "name": "13#矫直线",
+      "mode": "direct",
+      "ip": "172.25.2.122",
+      "port": 8206
+    },
+    {
+      "name": "2#横切线",
+      "mode": "direct",
+      "ip": "172.25.2.12",
+      "port": 8207
+    },
+    {
+      "name": "3#横切线",
+      "mode": "direct",
+      "ip": "172.25.2.26",
+      "port": 8208
+    },
+    {
+      "name": "5#生产线",
+      "mode": "direct",
+      "ip": "172.25.2.11",
+      "port": 8209
+    },
+    {
+      "name": "6#生产线",
+      "mode": "direct",
+      "ip": "172.25.3.7",
+      "port": 8210
+    },
+    {
+      "name": "6#矫直线",
+      "mode": "direct",
+      "ip": "172.25.3.7",
+      "port": 8211
+    },
+    {
+      "name": "7#矫直线",
+      "mode": "direct",
+      "ip": "172.25.2.11",
+      "port": 8212
+    },
+    {
+      "name": "8#生产线",
+      "mode": "direct",
+      "ip": "172.25.2.42",
+      "port": 8213
+    },
+    {
+      "name": "8#矫直线",
+      "mode": "direct",
+      "ip": "172.25.2.42",
+      "port": 8214
+    },
+    {
+      "name": "9#生产线",
+      "mode": "direct",
+      "ip": "172.25.2.43",
+      "port": 8215
+    },
+    {
+      "name": "9#矫直线",
+      "mode": "direct",
+      "ip": "172.25.2.43",
+      "port": 8216
+    },
+    {
+      "name": "SED线",
+      "mode": "direct",
+      "ip": "172.25.2.11",
+      "port": 8217
+    }
+  ]
+}

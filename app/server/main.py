@@ -20,7 +20,7 @@ from sqlalchemy import text
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.server import deps
-from app.server.api import defects, health, images, steels, meta
+from app.server.api import defects, health, images, steels, meta, net
 from app.server.api.dependencies import get_image_service
 from app.server.config.settings import ENV_CONFIG_KEY, ensure_config_file
 
@@ -132,6 +132,7 @@ app.include_router(steels.router)
 app.include_router(defects.router)
 app.include_router(images.router)
 app.include_router(meta.router)
+app.include_router(net.router)
 
 
 if __name__ == "__main__":

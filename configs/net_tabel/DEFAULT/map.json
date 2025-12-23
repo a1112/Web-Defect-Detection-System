@@ -1,0 +1,24 @@
+{
+  "defaults": {
+    "database": {
+      "drive": "mysql",
+      "port": 3306,
+      "user": "root",
+      "password": "nercar",
+      "charset": "utf8",
+      "database_type": "ncdplate"
+    },
+    "images": {
+      "top_root": "\\\\{ip}\\imgsrc1",
+      "bottom_root": "\\\\{ip}\\imgsrc2",
+      "default_view": "2D",
+      "file_extension": "jpg",
+      "frame_width": 16384,
+      "frame_height": 1024,
+      "mode": "L"
+    }
+  },
+  "lines": [
+    { "name": "本地测试数据", "mode": "direct", "ip": "127.0.0.1", "port": 8120 }
+  ]
+}

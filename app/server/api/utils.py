@@ -3,10 +3,24 @@ from __future__ import annotations
 import json
 from functools import lru_cache
 from pathlib import Path
+import os
 from typing import Optional
 
 CONFIG_DIR = Path(__file__).resolve().parents[3] / "configs"
-DEFECT_CLASS_FILE = CONFIG_DIR / "DefectClass.json"
+NET_TABLE_DIR = CONFIG_DIR / "net_tabel"
+DEFAULT_DEFECT_CLASS = CONFIG_DIR / "DefectClass.json"
+
+
+def _resolve_defect_class_file() -> Path:
+    env_path = os.getenv("DEFECT_CLASS_PATH")
+    if env_path:
+        candidate = Path(env_path)
+        if candidate.exists():
+            return candidate
+    fallback = NET_TABLE_DIR / "DEFAULT" / "本地测试数据" / "DefectClass.json"
+    if fallback.exists():
+        return fallback
+    return DEFAULT_DEFECT_CLASS
 
 
 def grade_to_level(grade: Optional[int] | None) -> str:
@@ -31,7 +45,8 @@ def grade_to_severity(grade: Optional[int] | None) -> str:
 
 @lru_cache()
 def _defect_class_payload() -> dict:
-    with open(DEFECT_CLASS_FILE, "r", encoding="utf-8") as fp:
+    defect_class_file = _resolve_defect_class_file()
+    with open(defect_class_file, "r", encoding="utf-8") as fp:
         return json.load(fp)
 
 
