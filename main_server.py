@@ -6,15 +6,20 @@ import logging.handlers
 import os
 import multiprocessing as mp
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 import re
 import json
 from typing import Any
 
 import uvicorn
+from sqlalchemy import func
 
 from app.server.config.settings import ENV_CONFIG_KEY
 from app.server.config_center import create_app
+from app.server.config.settings import ServerSettings
+from app.server.database import get_main_session
+from app.server.db.models.ncdplate import Steelrecord
 from app.server.net_table import load_map_config, build_config_for_line
 
 logger = logging.getLogger(__name__)
@@ -207,6 +212,7 @@ class LineProcessManager:
             main_proc = next((item for item in group if item.kind == "default"), None)
             small_proc = next((item for item in group if item.kind == "small"), None)
             process = main_proc.process if main_proc else None
+            status = self._get_line_status(main_proc or (group[0] if group else None))
             items.append(
                 {
                     "key": key,
@@ -218,6 +224,9 @@ class LineProcessManager:
                     "profile": main_proc.profile if main_proc else None,
                     "pid": process.pid if process else None,
                     "running": bool(process and process.is_alive()),
+                    "online": status.get("online"),
+                    "latest_timestamp": status.get("latest_timestamp"),
+                    "latest_age_seconds": status.get("latest_age_seconds"),
                     "path": f"/api/{key}",
                     "small_path": f"/small--api/{key}",
                 }
@@ -242,6 +251,26 @@ class LineProcessManager:
             line.process.join(timeout=10)
         self._start_line(line)
         return True
+
+    def _get_line_status(self, line: LineProcess | None) -> dict[str, Any]:
+        if not line:
+            return {"online": False, "latest_timestamp": None, "latest_age_seconds": None}
+        try:
+            settings = ServerSettings.load(line.config_path)
+            with get_main_session(settings) as session:
+                latest = session.query(func.max(Steelrecord.detectTime)).scalar()
+            if latest is None:
+                return {"online": True, "latest_timestamp": None, "latest_age_seconds": None}
+            now = datetime.utcnow()
+            age_seconds = max(0, int((now - latest).total_seconds()))
+            return {
+                "online": True,
+                "latest_timestamp": latest.isoformat(),
+                "latest_age_seconds": age_seconds,
+            }
+        except Exception:
+            logger.exception("Failed to query latest Steelrecord for '%s'", line.name)
+            return {"online": False, "latest_timestamp": None, "latest_age_seconds": None}
 
 
 def main() -> None:
