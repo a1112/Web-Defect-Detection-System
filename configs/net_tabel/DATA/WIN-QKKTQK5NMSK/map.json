@@ -24,109 +24,127 @@
       "name": "1#横切线",
       "mode": "direct",
       "ip": "172.25.2.10",
-      "port": 8200
+      "port": 8200,
+      "key": "hq_1"
     },
     {
       "name": "10#生产线",
       "mode": "direct",
       "ip": "172.25.2.99",
-      "port": 8201
+      "port": 8201,
+       "key": "sc_10"
     },
     {
       "name": "11#生产线",
       "mode": "direct",
       "ip": "172.25.2.98",
-      "port": 8202
+      "port": 8202,
+       "key": "sc_11"
     },
     {
       "name": "11#矫直线",
       "mode": "direct",
       "ip": "172.25.2.98",
-      "port": 8203
+      "port": 8203,
+       "key": "jz_13"
     },
     {
       "name": "12#生产线",
       "mode": "direct",
       "ip": "172.25.2.114",
-      "port": 8204
+      "port": 8204,
+      "key": "sc_11"
     },
     {
       "name": "12#矫直线",
       "mode": "direct",
       "ip": "172.25.2.114",
-      "port": 8205
+      "port": 8205,
+      "key": "jz_12"
     },
     {
       "name": "13#矫直线",
       "mode": "direct",
       "ip": "172.25.2.122",
-      "port": 8206
+      "port": 8206,
+      "key": "jz_13"
     },
     {
       "name": "2#横切线",
       "mode": "direct",
       "ip": "172.25.2.12",
-      "port": 8207
+      "port": 8207,
+      "key": "hq_2"
     },
     {
       "name": "3#横切线",
       "mode": "direct",
       "ip": "172.25.2.26",
-      "port": 8208
+      "port": 8208,
+      "key": "hq_3"
     },
     {
       "name": "5#生产线",
       "mode": "direct",
       "ip": "172.25.2.11",
-      "port": 8209
+      "port": 8209,
+      "key": "sc_5"
     },
     {
       "name": "6#生产线",
       "mode": "direct",
       "ip": "172.25.3.7",
-      "port": 8210
+      "port": 8210,
+      "key": "sc_6"
     },
     {
       "name": "6#矫直线",
       "mode": "direct",
       "ip": "172.25.3.7",
-      "port": 8211
+      "port": 8211,
+      "key": "jz_6"
     },
     {
       "name": "7#矫直线",
       "mode": "direct",
       "ip": "172.25.2.11",
-      "port": 8212
+      "port": 8212,
+      "key": "jz_7"
     },
     {
       "name": "8#生产线",
       "mode": "direct",
       "ip": "172.25.2.42",
-      "port": 8213
+      "port": 8213,
+      "key": "sc_8"
     },
     {
       "name": "8#矫直线",
       "mode": "direct",
       "ip": "172.25.2.42",
-      "port": 8214
+      "port": 8214,
+      "key": "jz_8"
     },
     {
       "name": "9#生产线",
       "mode": "direct",
       "ip": "172.25.2.43",
-      "port": 8215
+      "port": 8215,
+      "key": "sc_9"
     },
     {
       "name": "9#矫直线",
       "mode": "direct",
       "ip": "172.25.2.43",
-      "port": 8216
+      "port": 8216,
+      "key": "jz_9"
     },
     {
       "name": "SED线",
       "mode": "direct",
       "ip": "172.25.2.11",
-      "port": 8217
+      "port": 8217,
+      "key": "sed"
     }
   ]
 }

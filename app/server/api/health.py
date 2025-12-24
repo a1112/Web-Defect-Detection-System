@@ -35,3 +35,8 @@ def healthcheck():
             "latency_ms": latency_ms,
         },
     )
+
+
+@router.get("/api/health", response_model=HealthStatus)
+def healthcheck_api():
+    return healthcheck()

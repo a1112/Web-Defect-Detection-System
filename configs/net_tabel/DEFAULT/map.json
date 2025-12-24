@@ -20,6 +20,7 @@
     }
   },
   "lines": [
-    { "name": "本地测试数据", "mode": "direct", "ip": "127.0.0.1", "port": 8120 }
+    { "name": "本地测试数据",
+      "key": "test","mode": "direct", "ip": "127.0.0.1", "port": 8120 }
   ]
 }

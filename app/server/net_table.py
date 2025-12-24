@@ -142,13 +142,15 @@ def get_api_list(hostname: str | None = None) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     for line in lines:
         name = str(line.get("name") or "")
-        if not name:
+        key = str(line.get("key") or name)
+        if not key:
             continue
-        encoded = quote(name, safe="")
+        encoded = quote(key, safe="")
         profile = line.get("profile") or line.get("api_profile") or "default"
-        path_suffix = "small-api" if profile == "small" else "api"
+        path_suffix = "small--api" if profile == "small" else "api"
         items.append(
             {
+                "key": key,
                 "name": name,
                 "mode": line.get("mode") or "direct",
                 "path": f"/{encoded}/{path_suffix}",

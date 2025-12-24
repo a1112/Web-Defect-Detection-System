@@ -5,6 +5,7 @@ import logging
 import logging.handlers
 import os
 import multiprocessing as mp
+from dataclasses import dataclass
 from pathlib import Path
 import re
 import json
@@ -13,6 +14,7 @@ from typing import Any
 import uvicorn
 
 from app.server.config.settings import ENV_CONFIG_KEY
+from app.server.config_center import create_app
 from app.server.net_table import load_map_config, build_config_for_line
 
 logger = logging.getLogger(__name__)
@@ -157,6 +159,91 @@ def _log_database_url(config_path: Path, line_name: str) -> None:
         logger.exception("Failed to resolve database URL for line '%s' from %s", line_name, config_path)
 
 
+@dataclass
+class LineProcess:
+    key: str
+    name: str
+    host: str
+    port: int
+    profile: str | None
+    config_path: Path
+    defect_class_path: Path | None
+    ip: str | None
+    kind: str
+    process: mp.Process | None = None
+
+
+class LineProcessManager:
+    def __init__(self) -> None:
+        self._lines: dict[str, list[LineProcess]] = {}
+
+    def add_line(self, line: LineProcess) -> None:
+        self._lines.setdefault(line.key, []).append(line)
+
+    def start_all(self) -> None:
+        for group in self._lines.values():
+            for line in group:
+                self._start_line(line)
+
+    def restart_all(self) -> int:
+        count = 0
+        for group in self._lines.values():
+            for line in group:
+                if self._restart_line(line):
+                    count += 1
+        return count
+
+    def restart_line(self, name: str) -> bool:
+        group = self._lines.get(name)
+        if not group:
+            return False
+        for line in group:
+            self._restart_line(line)
+        return True
+
+    def get_api_list(self) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        for key, group in self._lines.items():
+            main_proc = next((item for item in group if item.kind == "default"), None)
+            small_proc = next((item for item in group if item.kind == "small"), None)
+            process = main_proc.process if main_proc else None
+            items.append(
+                {
+                    "key": key,
+                    "name": main_proc.name if main_proc else (group[0].name if group else key),
+                    "host": main_proc.host if main_proc else (group[0].host if group else "0.0.0.0"),
+                    "port": main_proc.port if main_proc else None,
+                    "small_port": small_proc.port if small_proc else None,
+                    "ip": main_proc.ip if main_proc else (group[0].ip if group else None),
+                    "profile": main_proc.profile if main_proc else None,
+                    "pid": process.pid if process else None,
+                    "running": bool(process and process.is_alive()),
+                    "path": f"/api/{key}",
+                    "small_path": f"/small--api/{key}",
+                }
+            )
+        return items
+
+    def _start_line(self, line: LineProcess) -> None:
+        if line.process and line.process.is_alive():
+            return
+        process = mp.Process(
+            target=_run_uvicorn,
+            args=(line.config_path, line.host, line.port, line.defect_class_path, line.name),
+            daemon=False,
+            name=line.name or None,
+        )
+        process.start()
+        line.process = process
+
+    def _restart_line(self, line: LineProcess) -> bool:
+        if line.process and line.process.is_alive():
+            line.process.terminate()
+            line.process.join(timeout=10)
+        self._start_line(line)
+        return True
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
     parser = argparse.ArgumentParser(description="Net table multi-line server launcher")
@@ -170,7 +257,7 @@ def main() -> None:
     if not lines:
         raise RuntimeError("No net_tabel lines found; check configs/net_tabel/DATA/<hostname>/map.json")
 
-    processes: list[mp.Process] = []
+    manager = LineProcessManager()
     base_port = 8200
     for idx, line in enumerate(lines):
         mode = (line.get("mode") or "direct").lower()
@@ -185,6 +272,7 @@ def main() -> None:
         host = _line_host(line)
         logger.info("Starting line '%s' on %s:%s with %s", line.get("name"), host, port, template.name)
         line_name = str(line.get("name") or "")
+        line_key = str(line.get("key") or line_name)
         defect_class_path = None
         if root and line_name:
             candidate = Path(root) / line_name / "DefectClass.json"
@@ -194,17 +282,41 @@ def main() -> None:
             fallback = REPO_ROOT / "configs" / "net_tabel" / "DEFAULT" / "本地测试数据" / "DefectClass.json"
             if fallback.exists():
                 defect_class_path = fallback
-        process = mp.Process(
-            target=_run_uvicorn,
-            args=(config_path, host, port, defect_class_path, line_name),
-            daemon=False,
-            name=line_name or None,
+        manager.add_line(
+            LineProcess(
+                key=line_key,
+                name=line_name,
+                host=host,
+                port=port,
+                profile=profile,
+                config_path=config_path,
+                defect_class_path=defect_class_path,
+                ip=line.get("ip"),
+                kind="default",
+            )
         )
-        process.start()
-        processes.append(process)
 
-    for process in processes:
-        process.join()
+        small_template = _resolve_template("small")
+        if small_template.exists():
+            small_config_path = build_config_for_line(line, small_template, defaults=defaults)
+            small_port = port + 100
+            manager.add_line(
+                LineProcess(
+                    key=line_key,
+                    name=line_name,
+                    host=host,
+                    port=small_port,
+                    profile="small",
+                    config_path=small_config_path,
+                    defect_class_path=defect_class_path,
+                    ip=line.get("ip"),
+                    kind="small",
+                )
+            )
+
+    manager.start_all()
+    config_app = create_app(manager)
+    uvicorn.run(config_app, host="0.0.0.0", port=8119, reload=False, workers=1)
 
 
 if __name__ == "__main__":
