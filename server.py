@@ -25,6 +25,8 @@ from app.server.net_table import load_map_config, build_config_for_line
 logger = logging.getLogger(__name__)
 REPO_ROOT = Path(__file__).resolve().parent
 CONFIG_DIR = REPO_ROOT / "configs"
+TEST_MODE_ENV = "DEFECT_TEST_MODE"
+TESTDATA_DIR_ENV = "DEFECT_TESTDATA_DIR"
 
 
 def _resolve_template(profile: str | None) -> Path:
@@ -47,18 +49,35 @@ def _line_host(line: dict[str, Any]) -> str:
     return str(host)
 
 
+def _ensure_testdata_dir(testdata_dir: Path) -> None:
+    required = [
+        testdata_dir / "DataBase",
+        testdata_dir / "Image",
+    ]
+    missing = [p for p in required if not p.exists()]
+    if not missing:
+        return
+    for path in missing:
+        logger.error("Missing TestData path: %s", path)
+    raise SystemExit(1)
+
+
 def _run_uvicorn(
     config_path: Path,
     host: str,
     port: int,
     defect_class_path: Path | None,
     line_name: str,
+    testdata_dir: Path | None,
 ) -> None:
     _configure_logging(line_name)
     _log_database_url(config_path, line_name)
     os.environ[ENV_CONFIG_KEY] = str(config_path.resolve())
     if defect_class_path:
         os.environ["DEFECT_CLASS_PATH"] = str(defect_class_path.resolve())
+    if testdata_dir is not None:
+        os.environ[TEST_MODE_ENV] = "true"
+        os.environ[TESTDATA_DIR_ENV] = str(testdata_dir)
     uvicorn.run(
         "app.server.main:app",
         host=host,
@@ -175,6 +194,7 @@ class LineProcess:
     defect_class_path: Path | None
     ip: str | None
     kind: str
+    testdata_dir: Path | None
     process: mp.Process | None = None
 
 
@@ -238,7 +258,7 @@ class LineProcessManager:
             return
         process = mp.Process(
             target=_run_uvicorn,
-            args=(line.config_path, line.host, line.port, line.defect_class_path, line.name),
+            args=(line.config_path, line.host, line.port, line.defect_class_path, line.name, line.testdata_dir),
             daemon=False,
             name=line.name or None,
         )
@@ -277,7 +297,17 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO)
     parser = argparse.ArgumentParser(description="Net table multi-line server launcher")
     parser.add_argument("--hostname", default=None, help="Override hostname for net_tabel lookup")
+    parser.add_argument(
+        "--test_data",
+        action="store_true",
+        help="Use TestData as data source (SQLite + local images).",
+    )
     args = parser.parse_args()
+
+    testdata_dir: Path | None = None
+    if args.test_data:
+        testdata_dir = (REPO_ROOT / "TestData").resolve()
+        _ensure_testdata_dir(testdata_dir)
 
     config = load_map_config(args.hostname)
     defaults = config.get("defaults") or {}
@@ -322,6 +352,7 @@ def main() -> None:
                 defect_class_path=defect_class_path,
                 ip=line.get("ip"),
                 kind="default",
+                testdata_dir=testdata_dir,
             )
         )
 
@@ -340,6 +371,7 @@ def main() -> None:
                     defect_class_path=defect_class_path,
                     ip=line.get("ip"),
                     kind="small",
+                    testdata_dir=testdata_dir,
                 )
             )
 

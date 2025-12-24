@@ -87,6 +87,8 @@ DEFAULT_UI_BUILD_DIR = (
 UI_BUILD_DIR = Path(os.getenv(UI_BUILD_ENV_KEY, DEFAULT_UI_BUILD_DIR))
 SSL_CERT_ENV = "DEFECT_SSL_CERT"
 SSL_KEY_ENV = "DEFECT_SSL_KEY"
+TEST_MODE_ENV = "DEFECT_TEST_MODE"
+TESTDATA_DIR_ENV = "DEFECT_TESTDATA_DIR"
 
 
 def _resolve_ui_index() -> Path | None:
@@ -95,6 +97,19 @@ def _resolve_ui_index() -> Path | None:
         if candidate.exists():
             return candidate
     return None
+
+
+def _ensure_testdata_dir(testdata_dir: Path) -> None:
+    required = [
+        testdata_dir / "DataBase",
+        testdata_dir / "Image",
+    ]
+    missing = [p for p in required if not p.exists()]
+    if not missing:
+        return
+    for path in missing:
+        logger.error("Missing TestData path: %s", path)
+    raise SystemExit(1)
 
 
 if UI_BUILD_DIR.exists():
@@ -156,12 +171,23 @@ if __name__ == "__main__":
     )
     parser.add_argument("--ssl-certfile", default="", help="Path to SSL certificate (PEM)")
     parser.add_argument("--ssl-keyfile", default=None, help="Path to SSL private key (PEM)")
+    parser.add_argument(
+        "--test_data",
+        action="store_true",
+        help="Use TestData as data source (SQLite + local images).",
+    )
     args = parser.parse_args()
 
     if args.config:
         os.environ[ENV_CONFIG_KEY] = str(Path(args.config).resolve())
 
     ensure_config_file(args.config)
+
+    if args.test_data:
+        testdata_dir = (REPO_ROOT / "TestData").resolve()
+        _ensure_testdata_dir(testdata_dir)
+        os.environ[TEST_MODE_ENV] = "true"
+        os.environ[TESTDATA_DIR_ENV] = str(testdata_dir)
 
     if args.reload and args.workers != 1:
         logger.warning(
