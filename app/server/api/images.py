@@ -156,13 +156,9 @@ def api_tile_image(
 ):
     """按瓦片信息返回拼接图的分块，便于大图分片加载。"""
     try:
-        requested_orientation = orientation
-        if requested_orientation != "vertical":
-            logger.info(
-                "tile orientation=%s requested; serving vertical tiles only",
-                requested_orientation,
-            )
-        orientation = "vertical"
+        if view is not None and view.lower() == "horizontal":
+            orientation = "horizontal"
+            view = None
         resolved_viewer_id = viewer_id
         if not resolved_viewer_id:
             forwarded = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
@@ -186,7 +182,7 @@ def api_tile_image(
             "X-Tile-X": str(tile_x),
             "X-Tile-Y": str(tile_y),
             "X-Tile-Size": str(service.settings.images.frame_height),
-            "X-Tile-Orientation": "vertical",
+            "X-Tile-Orientation": orientation,
         }
         cache_ttl = int(getattr(service.settings.images, "cache_ttl_seconds", 120) or 120)
         headers["Cache-Control"] = f"public, max-age={cache_ttl}"

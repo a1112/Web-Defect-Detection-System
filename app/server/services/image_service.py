@@ -337,7 +337,6 @@ class ImageService:
         orientation = (orientation or "vertical").lower()
         if orientation not in {"horizontal", "vertical"}:
             raise ValueError(f"Unsupported orientation '{orientation}'")
-        orientation = "vertical"
         if level < 0:
             raise ValueError("Unsupported level (must be >= 0)")
         max_level = self.disk_cache.max_level()
