@@ -20,9 +20,10 @@ from sqlalchemy import text
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.server import deps
-from app.server.api import defects, health, images, steels, meta, net
+from app.server.api import defects, health, images, steels, meta, net, admin
 from app.server.api.dependencies import get_image_service
 from app.server.config.settings import ENV_CONFIG_KEY, ensure_config_file
+from app.server.rbac.manager import bootstrap_management
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,13 @@ async def app_lifespan(app: FastAPI):
             session.execute(text("SELECT 1"))
     except Exception:
         logger.exception("Failed to warm up main database connection.")
+
+    try:
+        settings = deps.get_settings()
+        with deps.get_management_db() as session:
+            bootstrap_management(settings, session)
+    except Exception:
+        logger.exception("Failed to initialize management database.")
 
     try:
         get_image_service().start_background_workers()
@@ -148,6 +156,8 @@ app.include_router(defects.router)
 app.include_router(images.router)
 app.include_router(meta.router)
 app.include_router(net.router)
+app.include_router(admin.router, prefix="/api")
+app.include_router(admin.router, prefix="/config")
 
 
 if __name__ == "__main__":

@@ -23,6 +23,7 @@ class DatabaseSettings(BaseModel):
     password: str = Field(default="nercar")
     charset: str = Field(default="utf8")
     database_type: str = Field(default="ncdplate")
+    management_database: str = Field(default="DefectDetectionDatabBase")
     sqlite_dir: Optional[Path] = Field(
         default=None,
         description="Directory containing SQLite backups named like {database}.db",

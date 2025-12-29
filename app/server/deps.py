@@ -7,7 +7,8 @@ from pathlib import Path
 from sqlalchemy.orm import Session
 
 from .config.settings import ServerSettings, ensure_config_file
-from .database import get_defect_session, get_main_session
+from .database import get_defect_session, get_main_session, get_management_session
+from .rbac.manager import bootstrap_management
 
 TEST_MODE_ENV = "DEFECT_TEST_MODE"
 TESTDATA_DIR_ENV = "DEFECT_TESTDATA_DIR"
@@ -59,3 +60,24 @@ def get_main_db() -> Session:
 def get_defect_db() -> Session:
     settings = get_settings()
     return get_defect_session(settings)
+
+
+def get_management_db() -> Session:
+    settings = get_settings()
+    db_settings = settings.database
+    if db_settings.drive != "sqlite" and "{ip}" in (db_settings.host or ""):
+        fallback_dir = Path(__file__).resolve().parents[2] / "work" / "local_db"
+        fallback_dir.mkdir(parents=True, exist_ok=True)
+        fallback_settings = settings.model_copy(
+            update={
+                "database": db_settings.model_copy(
+                    update={"drive": "sqlite", "sqlite_dir": fallback_dir}
+                )
+            }
+        )
+        session = get_management_session(fallback_settings)
+        bootstrap_management(fallback_settings, session)
+        return session
+    session = get_management_session(settings)
+    bootstrap_management(settings, session)
+    return session

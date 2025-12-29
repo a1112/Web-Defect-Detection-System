@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import socket
+import shutil
 from pathlib import Path
 from typing import Any, Iterable
 from urllib.parse import quote
@@ -18,7 +19,10 @@ def resolve_net_table_dir(hostname: str | None = None) -> Path:
     candidate = DATA_ROOT / name
     if candidate.exists():
         return candidate
-    return DEFAULT_ROOT
+    candidate.mkdir(parents=True, exist_ok=True)
+    if DEFAULT_ROOT.exists():
+        shutil.copytree(DEFAULT_ROOT, candidate, dirs_exist_ok=True)
+    return candidate
 
 
 def _iter_line_dirs(root: Path) -> Iterable[Path]:
@@ -77,6 +81,35 @@ def load_map_config(hostname: str | None = None) -> dict[str, Any]:
             lines = _generate_lines_from_dirs(fallback_root)
             root = fallback_root
     return {"root": root, "lines": lines, "defaults": defaults}
+
+
+def load_map_payload(hostname: str | None = None) -> tuple[Path, dict[str, Any]]:
+    root = resolve_net_table_dir(hostname)
+    map_path = root / "map.json"
+    defaults: dict[str, Any] = {}
+    if map_path.exists() and map_path.stat().st_size > 0:
+        payload = json.loads(map_path.read_text(encoding="utf-8"))
+        if isinstance(payload, list):
+            return root, {"defaults": {}, "lines": payload}
+        if isinstance(payload, dict):
+            defaults = payload.get("defaults") or {}
+            lines = payload.get("lines") or payload.get("items") or payload.get("data") or []
+            return root, {"defaults": defaults, "lines": lines}
+    lines = _generate_lines_from_dirs(root)
+    return root, {"defaults": defaults, "lines": lines}
+
+
+def save_map_payload(payload: dict[str, Any], hostname: str | None = None) -> Path:
+    root = resolve_net_table_dir(hostname)
+    map_path = root / "map.json"
+    payload = payload or {}
+    defaults = payload.get("defaults") or {}
+    lines = payload.get("lines") or []
+    if not isinstance(lines, list):
+        raise ValueError("lines must be a list")
+    stored = {"defaults": defaults, "lines": lines}
+    map_path.write_text(json.dumps(stored, ensure_ascii=False, indent=2), encoding="utf-8")
+    return map_path
 
 
 def _merge_dict(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:

@@ -6,7 +6,8 @@
     "user": "root",
     "password": "nercar",
     "charset": "utf8",
-    "database_type": "ncdplate"
+    "database_type": "ncdplate",
+    "management_database": "DefectDetectionDatabBase"
   },
   "images": {
     "top_root": "\\\\{ip}\\imgsrc1",

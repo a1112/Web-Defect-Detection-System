@@ -7,3 +7,6 @@ fastapi
 Pillow
 requests
 uvicorn
+casbin
+casbin_sqlalchemy_adapter
+psutil
