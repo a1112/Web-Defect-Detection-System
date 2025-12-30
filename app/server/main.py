@@ -6,28 +6,90 @@ import sys
 import logging
 from pathlib import Path
 from contextlib import asynccontextmanager
+from datetime import datetime
+from threading import Event, Thread
 
 # Ensure repository root is on sys.path before importing app.*
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
-from fastapi.staticfiles import StaticFiles
-from sqlalchemy import text
-from starlette.middleware.base import BaseHTTPMiddleware
+from sqlalchemy import func, text
+import requests
 
 from app.server import deps
 from app.server.api import defects, health, images, steels, meta, net, admin
 from app.server.api.dependencies import get_image_service
 from app.server.config.settings import ENV_CONFIG_KEY, ensure_config_file
 from app.server.rbac.manager import bootstrap_management
+from app.server.db.models.ncdplate import Steelrecord
 
 logger = logging.getLogger(__name__)
 
 API_VERSION = "0.1.0"
+CONFIG_CENTER_URL_ENV = "DEFECT_CONFIG_CENTER_URL"
+LINE_KEY_ENV = "DEFECT_LINE_KEY"
+LINE_NAME_ENV = "DEFECT_LINE_NAME"
+LINE_KIND_ENV = "DEFECT_LINE_KIND"
+LINE_HOST_ENV = "DEFECT_LINE_HOST"
+LINE_PORT_ENV = "DEFECT_LINE_PORT"
+HEARTBEAT_INTERVAL_ENV = "DEFECT_CONFIG_HEARTBEAT_INTERVAL_SECONDS"
+
+
+def _resolve_status_url(base_url: str) -> str:
+    cleaned = base_url.rstrip("/")
+    if cleaned.endswith("/config"):
+        return f"{cleaned}/api_status"
+    return f"{cleaned}/config/api_status"
+
+
+def _parse_int(value: str | None) -> int | None:
+    if not value:
+        return None
+    if value.isdigit():
+        return int(value)
+    return None
+
+
+def _collect_status_payload(line_key: str, line_name: str | None, line_kind: str | None) -> dict[str, object]:
+    latest_timestamp = None
+    latest_age_seconds = None
+    online = True
+    try:
+        with deps.get_main_db() as session:
+            latest = session.query(func.max(Steelrecord.detectTime)).scalar()
+        if latest is not None:
+            latest_timestamp = latest.isoformat()
+            latest_age_seconds = max(0, int((datetime.utcnow() - latest).total_seconds()))
+    except Exception:
+        logger.exception("Failed to query latest Steelrecord for status push.")
+        online = False
+    payload: dict[str, object] = {
+        "key": line_key,
+        "name": line_name,
+        "kind": line_kind or "default",
+        "host": os.getenv(LINE_HOST_ENV),
+        "port": _parse_int(os.getenv(LINE_PORT_ENV)),
+        "pid": os.getpid(),
+        "online": online,
+        "latest_timestamp": latest_timestamp,
+        "latest_age_seconds": latest_age_seconds,
+    }
+    return payload
+
+
+def _status_reporter(stop_event: Event, base_url: str, line_key: str, line_name: str | None, line_kind: str | None) -> None:
+    interval = _parse_int(os.getenv(HEARTBEAT_INTERVAL_ENV)) or 15
+    status_url = _resolve_status_url(base_url)
+    while not stop_event.is_set():
+        payload = _collect_status_payload(line_key, line_name, line_kind)
+        try:
+            requests.post(status_url, json=payload, timeout=5)
+        except Exception:
+            logger.exception("Failed to post status update to config center: %s", status_url)
+        stop_event.wait(interval)
 
 
 @asynccontextmanager
@@ -50,11 +112,29 @@ async def app_lifespan(app: FastAPI):
         get_image_service().start_background_workers()
     except Exception:
         logger.exception("Failed to start background cache workers.")
+    status_stop: Event | None = None
+    status_thread: Thread | None = None
+    config_center_url = os.getenv(CONFIG_CENTER_URL_ENV, "").strip()
+    line_key = os.getenv(LINE_KEY_ENV) or os.getenv(LINE_NAME_ENV)
+    line_name = os.getenv(LINE_NAME_ENV)
+    line_kind = os.getenv(LINE_KIND_ENV)
+    if config_center_url and line_key:
+        status_stop = Event()
+        status_thread = Thread(
+            target=_status_reporter,
+            args=(status_stop, config_center_url, line_key, line_name, line_kind),
+            daemon=True,
+        )
+        status_thread.start()
     yield
     try:
         get_image_service().stop_background_workers()
     except Exception:
         logger.exception("Failed to stop background cache workers.")
+    if status_stop:
+        status_stop.set()
+    if status_thread:
+        status_thread.join(timeout=2)
 
 
 app = FastAPI(title="Web Defect Detection API", version=API_VERSION, lifespan=app_lifespan)
@@ -68,45 +148,6 @@ app.add_middleware(
 )
 
 
-class CoopCoepMiddleware(BaseHTTPMiddleware):
-    """Ensure /ui responses can use SharedArrayBuffer by enabling cross-origin isolation."""
-
-    async def dispatch(self, request, call_next):
-        response = await call_next(request)
-        path = request.url.path or ""
-        if path == "/" or path.startswith("/ui"):
-            response.headers.setdefault("Cross-Origin-Opener-Policy", "same-origin")
-            response.headers.setdefault("Cross-Origin-Embedder-Policy", "require-corp")
-            response.headers.setdefault("Cross-Origin-Resource-Policy", "same-origin")
-        return response
-
-
-app.add_middleware(CoopCoepMiddleware)
-
-UI_BUILD_ENV_KEY = "DEFECT_UI_BUILD_DIR"
-DEFAULT_UI_BUILD_DIR = (
-    REPO_ROOT
-    / "app"
-    / "ui"
-    / "DefectWebUi"
-    / "build"
-    / "WebAssembly_Qt_6_10_0_multi_threaded-MinSizeRel"
-)
-UI_BUILD_DIR = Path(os.getenv(UI_BUILD_ENV_KEY, DEFAULT_UI_BUILD_DIR))
-SSL_CERT_ENV = "DEFECT_SSL_CERT"
-SSL_KEY_ENV = "DEFECT_SSL_KEY"
-TEST_MODE_ENV = "DEFECT_TEST_MODE"
-TESTDATA_DIR_ENV = "DEFECT_TESTDATA_DIR"
-
-
-def _resolve_ui_index() -> Path | None:
-    for name in ("DefectWebUi.html", "index.html"):
-        candidate = UI_BUILD_DIR / name
-        if candidate.exists():
-            return candidate
-    return None
-
-
 def _ensure_testdata_dir(testdata_dir: Path) -> None:
     required = [
         testdata_dir / "DataBase",
@@ -118,35 +159,6 @@ def _ensure_testdata_dir(testdata_dir: Path) -> None:
     for path in missing:
         logger.error("Missing TestData path: %s", path)
     raise SystemExit(1)
-
-
-if UI_BUILD_DIR.exists():
-    app.mount(
-        "/ui",
-        StaticFiles(directory=str(UI_BUILD_DIR), html=True),
-        name="defect-web-ui",
-    )
-
-    @app.get("/", include_in_schema=False)
-    async def serve_ui_root():
-        """提供前端静态页面入口文件。"""
-        index_path = _resolve_ui_index()
-        if not index_path:
-            raise HTTPException(
-                status_code=404,
-                detail=(
-                    "Defect Web UI index not found inside "
-                    f"{UI_BUILD_DIR}. Check your WASM build output."
-                ),
-            )
-        return FileResponse(index_path)
-else:
-    logger.warning(
-        "Defect Web UI build directory %s not found. "
-        "Set %s to point at your Qt WASM output to enable the frontend.",
-        UI_BUILD_DIR,
-        UI_BUILD_ENV_KEY,
-    )
 
 
 # Register API routers

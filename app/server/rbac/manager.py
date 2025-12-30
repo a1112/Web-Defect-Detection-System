@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.server.config.settings import ServerSettings
@@ -102,21 +103,37 @@ def ensure_admin_user(session: Session) -> None:
     admin_name = "admin"
     admin_password = "Nercar701"
 
+    def _get_role() -> rbac_models.Role | None:
+        return session.execute(
+            select(rbac_models.Role).where(rbac_models.Role.name == "admin")
+        ).scalar_one_or_none()
+
+    def _ensure_role() -> rbac_models.Role:
+        role = _get_role()
+        if role:
+            return role
+        role = rbac_models.Role(name="admin", description="System administrators")
+        session.add(role)
+        try:
+            session.flush()
+        except IntegrityError:
+            session.rollback()
+            role = _get_role()
+            if role:
+                return role
+            raise
+        return role
+
     existing = session.execute(
         select(rbac_models.User).where(rbac_models.User.username == admin_name)
     ).scalar_one_or_none()
-    role = session.execute(
-        select(rbac_models.Role).where(rbac_models.Role.name == "admin")
-    ).scalar_one_or_none()
     if existing:
-        if not role:
-            role = rbac_models.Role(name="admin", description="System administrators")
-            session.add(role)
-            session.flush()
+        role = _ensure_role()
         if not existing.roles:
             session.add(rbac_models.UserRole(user_id=existing.id, role_id=role.id))
             session.commit()
         return
+
     salt = secrets.token_hex(16)
     password_hash = _hash_password(admin_password, salt)
     user = rbac_models.User(
@@ -127,13 +144,22 @@ def ensure_admin_user(session: Session) -> None:
         is_superuser=True,
     )
     session.add(user)
-    session.flush()
-
-    if not role:
-        role = rbac_models.Role(name="admin", description="System administrators")
-        session.add(role)
+    try:
         session.flush()
+    except IntegrityError:
+        session.rollback()
+        existing = session.execute(
+            select(rbac_models.User).where(rbac_models.User.username == admin_name)
+        ).scalar_one_or_none()
+        if not existing:
+            raise
+        role = _ensure_role()
+        if not existing.roles:
+            session.add(rbac_models.UserRole(user_id=existing.id, role_id=role.id))
+            session.commit()
+        return
 
+    role = _ensure_role()
     link = rbac_models.UserRole(user_id=user.id, role_id=role.id)
     session.add(link)
     session.commit()

@@ -12,6 +12,8 @@
   "images": {
     "top_root": "\\\\{ip}\\imgsrc1",
     "bottom_root": "\\\\{ip}\\imgsrc2",
+    "disk_cache_top_root": "\\\\{ip}\\imgsrc1",
+    "disk_cache_bottom_root": "\\\\{ip}\\imgsrc2",
     "default_view": "2D",
     "file_extension": "jpg",
     "frame_width": 16384,

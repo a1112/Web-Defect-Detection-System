@@ -45,6 +45,8 @@ class DatabaseSettings(BaseModel):
 class ImageSettings(BaseModel):
     top_root: Path
     bottom_root: Path
+    disk_cache_top_root: Optional[Path] = Field(default=None)
+    disk_cache_bottom_root: Optional[Path] = Field(default=None)
     default_view: str = Field(default="2D")
     file_extension: str = Field(default="jpg")
     frame_width: int = Field(default=16384, ge=1)
@@ -84,8 +86,10 @@ class ImageSettings(BaseModel):
     disk_cache_precache_levels: int = Field(default=1, ge=1)
     mode: str = Field(default="L", description="Pillow image mode, e.g. L/RGB")
 
-    @validator("top_root", "bottom_root", pre=True)
+    @validator("top_root", "bottom_root", "disk_cache_top_root", "disk_cache_bottom_root", pre=True)
     def _coerce_path(cls, value: str | Path) -> Path:
+        if value is None or value == "":
+            return value
         return Path(value)
 
     @validator("tile_default_size", always=True)

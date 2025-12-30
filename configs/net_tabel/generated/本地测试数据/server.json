@@ -13,6 +13,8 @@
   "images": {
     "top_root": "\\\\127.0.0.1\\imgsrc1",
     "bottom_root": "\\\\127.0.0.1\\imgsrc2",
+    "disk_cache_top_root": "\\\\127.0.0.1\\imgsrc1",
+    "disk_cache_bottom_root": "\\\\127.0.0.1\\imgsrc2",
     "default_view": "2D",
     "file_extension": "jpg",
     "frame_width": 16384,

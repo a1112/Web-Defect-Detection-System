@@ -315,6 +315,11 @@ def get_system_info():
     return response
 
 
+@router.get("/system-info")
+def get_system_info_alias():
+    return get_system_info()
+
+
 @router.get("/admin/users")
 def list_users(session: Session = Depends(deps.get_management_db)):
     return {"items": rbac_manager.list_users(session)}

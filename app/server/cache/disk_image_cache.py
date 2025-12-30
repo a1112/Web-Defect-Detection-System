@@ -23,7 +23,7 @@ class DiskImageCache:
     """
     File-level cache for tiles and defect crops.
     Layout (example):
-      {surface_root}/{seq_no}/cache/{view}/
+      {cache_root}/{seq_no}/cache/{view}/
         cache.json
         tile/{level}/{orientation}_{tile_x}_{tile_y}.jpg
         defects/{surface}/{defect_id}.jpg
@@ -63,15 +63,15 @@ class DiskImageCache:
             return 0
         return int(math.ceil(math.log(ratio, 2)))
 
-    def cache_dir(self, surface_root: Path, seq_no: int, view: Optional[str]) -> Path:
+    def cache_dir(self, cache_root: Path, seq_no: int, view: Optional[str]) -> Path:
         view_dir = view or self.view_name
         if self.flat_layout:
-            return surface_root / "cache" / view_dir
-        return surface_root / str(seq_no) / "cache" / view_dir
+            return cache_root / "cache" / view_dir
+        return cache_root / str(seq_no) / "cache" / view_dir
 
     def tile_path(
         self,
-        surface_root: Path,
+        cache_root: Path,
         seq_no: int,
         *,
         view: Optional[str],
@@ -80,24 +80,24 @@ class DiskImageCache:
         tile_x: int,
         tile_y: int,
     ) -> Path:
-        base = self.cache_dir(surface_root, seq_no, view)
+        base = self.cache_dir(cache_root, seq_no, view)
         return base / "tile" / str(level) / f"{orientation}_{tile_x}_{tile_y}.jpg"
 
     def defect_path(
         self,
-        surface_root: Path,
+        cache_root: Path,
         seq_no: int,
         *,
         view: Optional[str],
         surface: str,
         defect_id: int,
     ) -> Path:
-        base = self.cache_dir(surface_root, seq_no, view)
+        base = self.cache_dir(cache_root, seq_no, view)
         return base / "defects" / surface.lower() / f"{defect_id}.jpg"
 
     def read_tile(
         self,
-        surface_root: Path,
+        cache_root: Path,
         seq_no: int,
         *,
         view: Optional[str],
@@ -109,7 +109,7 @@ class DiskImageCache:
         if not self.enabled:
             return None
         path = self.tile_path(
-            surface_root,
+            cache_root,
             seq_no,
             view=view,
             level=level,
@@ -124,7 +124,7 @@ class DiskImageCache:
 
     def write_tile(
         self,
-        surface_root: Path,
+        cache_root: Path,
         seq_no: int,
         *,
         view: Optional[str],
@@ -137,7 +137,7 @@ class DiskImageCache:
         if not self.enabled or self.read_only:
             return
         path = self.tile_path(
-            surface_root,
+            cache_root,
             seq_no,
             view=view,
             level=level,
@@ -146,11 +146,11 @@ class DiskImageCache:
             tile_y=tile_y,
         )
         self._atomic_write(path, payload)
-        self._ensure_cache_json(surface_root, seq_no, view=view)
+        self._ensure_cache_json(cache_root, seq_no, view=view)
 
     def read_defect(
         self,
-        surface_root: Path,
+        cache_root: Path,
         seq_no: int,
         *,
         view: Optional[str],
@@ -159,7 +159,7 @@ class DiskImageCache:
     ) -> Optional[bytes]:
         if not self.enabled:
             return None
-        path = self.defect_path(surface_root, seq_no, view=view, surface=surface, defect_id=defect_id)
+        path = self.defect_path(cache_root, seq_no, view=view, surface=surface, defect_id=defect_id)
         try:
             return path.read_bytes() if path.exists() else None
         except OSError:
@@ -167,7 +167,7 @@ class DiskImageCache:
 
     def write_defect(
         self,
-        surface_root: Path,
+        cache_root: Path,
         seq_no: int,
         *,
         view: Optional[str],
@@ -177,20 +177,20 @@ class DiskImageCache:
     ) -> None:
         if not self.enabled or self.read_only:
             return
-        path = self.defect_path(surface_root, seq_no, view=view, surface=surface, defect_id=defect_id)
+        path = self.defect_path(cache_root, seq_no, view=view, surface=surface, defect_id=defect_id)
         self._atomic_write(path, payload)
-        self._ensure_cache_json(surface_root, seq_no, view=view)
+        self._ensure_cache_json(cache_root, seq_no, view=view)
 
     def cleanup_seq(
         self,
-        surface_root: Path,
+        cache_root: Path,
         seq_no: int,
         *,
         view: Optional[str],
     ) -> None:
         if not self.enabled or self.read_only:
             return
-        base = self.cache_dir(surface_root, seq_no, view)
+        base = self.cache_dir(cache_root, seq_no, view)
         tile_dir = base / "tile"
         defect_dir = base / "defects"
         self._enforce_limit(tile_dir, self.max_tiles)
@@ -199,8 +199,8 @@ class DiskImageCache:
     # ------------------------------------------------------------------ #
     # Internal
     # ------------------------------------------------------------------ #
-    def _ensure_cache_json(self, surface_root: Path, seq_no: int, *, view: Optional[str]) -> None:
-        base = self.cache_dir(surface_root, seq_no, view)
+    def _ensure_cache_json(self, cache_root: Path, seq_no: int, *, view: Optional[str]) -> None:
+        base = self.cache_dir(cache_root, seq_no, view)
         meta_path = base / "cache.json"
         if meta_path.exists():
             return

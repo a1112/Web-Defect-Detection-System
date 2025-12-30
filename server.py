@@ -11,15 +11,12 @@ from pathlib import Path
 import re
 import json
 from typing import Any
+from threading import Lock
 
 import uvicorn
-from sqlalchemy import func
 
 from app.server.config.settings import ENV_CONFIG_KEY
 from app.server.config_center import create_app
-from app.server.config.settings import ServerSettings
-from app.server.database import get_main_session
-from app.server.db.models.ncdplate import Steelrecord
 from app.server.net_table import load_map_config, build_config_for_line
 
 logger = logging.getLogger(__name__)
@@ -68,11 +65,20 @@ def _run_uvicorn(
     port: int,
     defect_class_path: Path | None,
     line_name: str,
+    line_key: str,
+    line_kind: str,
     testdata_dir: Path | None,
+    reload: bool,
 ) -> None:
     _configure_logging(line_name)
     _log_database_url(config_path, line_name)
     os.environ[ENV_CONFIG_KEY] = str(config_path.resolve())
+    os.environ["DEFECT_LINE_NAME"] = line_name
+    os.environ["DEFECT_LINE_KEY"] = line_key
+    os.environ["DEFECT_LINE_KIND"] = line_kind
+    os.environ["DEFECT_LINE_HOST"] = host
+    os.environ["DEFECT_LINE_PORT"] = str(port)
+    os.environ.setdefault("DEFECT_CONFIG_CENTER_URL", "http://127.0.0.1:8119")
     if defect_class_path:
         os.environ["DEFECT_CLASS_PATH"] = str(defect_class_path.resolve())
     if testdata_dir is not None:
@@ -82,7 +88,7 @@ def _run_uvicorn(
         "app.server.main:app",
         host=host,
         port=port,
-        reload=False,
+        reload=reload,
         workers=1,
     )
 
@@ -198,9 +204,26 @@ class LineProcess:
     process: mp.Process | None = None
 
 
+@dataclass
+class ApiStatusEntry:
+    key: str
+    kind: str
+    online: bool
+    latest_timestamp: datetime | None
+    last_seen: datetime
+    name: str | None = None
+    host: str | None = None
+    port: int | None = None
+    pid: int | None = None
+
+
 class LineProcessManager:
-    def __init__(self) -> None:
+    def __init__(self, *, reload: bool = False) -> None:
         self._lines: dict[str, list[LineProcess]] = {}
+        self._api_status: dict[tuple[str, str], ApiStatusEntry] = {}
+        self._status_lock = Lock()
+        self._status_ttl_seconds = int(os.getenv("DEFECT_API_STATUS_TTL_SECONDS", "60"))
+        self._reload = reload
 
     def add_line(self, line: LineProcess) -> None:
         self._lines.setdefault(line.key, []).append(line)
@@ -232,7 +255,7 @@ class LineProcessManager:
             main_proc = next((item for item in group if item.kind == "default"), None)
             small_proc = next((item for item in group if item.kind == "small"), None)
             process = main_proc.process if main_proc else None
-            status = self._get_line_status(main_proc or (group[0] if group else None))
+            status = self._get_cached_status(key)
             items.append(
                 {
                     "key": key,
@@ -253,12 +276,48 @@ class LineProcessManager:
             )
         return items
 
+    def update_api_status(self, status: dict[str, Any]) -> None:
+        key = str(status.get("key") or "")
+        if not key:
+            return
+        kind = str(status.get("kind") or "default")
+        latest_timestamp = status.get("latest_timestamp")
+        if isinstance(latest_timestamp, str):
+            latest_timestamp = _parse_iso_timestamp(latest_timestamp)
+        if not isinstance(latest_timestamp, datetime):
+            latest_timestamp = None
+        online_value = status.get("online")
+        online = bool(online_value) if online_value is not None else True
+        entry = ApiStatusEntry(
+            key=key,
+            kind=kind,
+            online=online,
+            latest_timestamp=latest_timestamp,
+            last_seen=datetime.utcnow(),
+            name=status.get("name"),
+            host=status.get("host"),
+            port=_coerce_int(status.get("port")),
+            pid=_coerce_int(status.get("pid")),
+        )
+        with self._status_lock:
+            self._api_status[(key, kind)] = entry
+
     def _start_line(self, line: LineProcess) -> None:
         if line.process and line.process.is_alive():
             return
         process = mp.Process(
             target=_run_uvicorn,
-            args=(line.config_path, line.host, line.port, line.defect_class_path, line.name, line.testdata_dir),
+            args=(
+                line.config_path,
+                line.host,
+                line.port,
+                line.defect_class_path,
+                line.name,
+                line.key,
+                line.kind,
+                line.testdata_dir,
+                self._reload,
+            ),
             daemon=False,
             name=line.name or None,
         )
@@ -272,25 +331,43 @@ class LineProcessManager:
         self._start_line(line)
         return True
 
-    def _get_line_status(self, line: LineProcess | None) -> dict[str, Any]:
-        if not line:
+    def _get_cached_status(self, key: str) -> dict[str, Any]:
+        now = datetime.utcnow()
+        with self._status_lock:
+            status = self._api_status.get((key, "default")) or self._api_status.get((key, "small"))
+        if not status:
             return {"online": False, "latest_timestamp": None, "latest_age_seconds": None}
-        try:
-            settings = ServerSettings.load(line.config_path)
-            with get_main_session(settings) as session:
-                latest = session.query(func.max(Steelrecord.detectTime)).scalar()
-            if latest is None:
-                return {"online": True, "latest_timestamp": None, "latest_age_seconds": None}
-            now = datetime.utcnow()
-            age_seconds = max(0, int((now - latest).total_seconds()))
-            return {
-                "online": True,
-                "latest_timestamp": latest.isoformat(),
-                "latest_age_seconds": age_seconds,
-            }
-        except Exception:
-            logger.exception("Failed to query latest Steelrecord for '%s'", line.name)
-            return {"online": False, "latest_timestamp": None, "latest_age_seconds": None}
+        age_since_seen = (now - status.last_seen).total_seconds()
+        stale = age_since_seen > self._status_ttl_seconds
+        online = status.online and not stale
+        latest_age_seconds = None
+        latest_timestamp = status.latest_timestamp
+        if latest_timestamp:
+            latest_age_seconds = max(0, int((now - latest_timestamp).total_seconds()))
+        return {
+            "online": online,
+            "latest_timestamp": latest_timestamp.isoformat() if latest_timestamp else None,
+            "latest_age_seconds": latest_age_seconds,
+        }
+
+
+def _parse_iso_timestamp(value: str) -> datetime | None:
+    try:
+        cleaned = value.strip()
+        if cleaned.endswith("Z"):
+            cleaned = cleaned[:-1] + "+00:00"
+        parsed = datetime.fromisoformat(cleaned)
+        return parsed.replace(tzinfo=None)
+    except ValueError:
+        return None
+
+
+def _coerce_int(value: Any) -> int | None:
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return None
 
 
 def main() -> None:
@@ -301,6 +378,12 @@ def main() -> None:
         "--test_data",
         action="store_true",
         help="Use TestData as data source (SQLite + local images).",
+    )
+    parser.add_argument(
+        "--reload",
+        action="store_true",
+        default=False,
+        help="Enable auto-reload for each API service (development only).",
     )
     args = parser.parse_args()
 
@@ -316,7 +399,7 @@ def main() -> None:
     if not lines:
         raise RuntimeError("No net_tabel lines found; check configs/net_tabel/DATA/<hostname>/map.json")
 
-    manager = LineProcessManager()
+    manager = LineProcessManager(reload=args.reload)
     base_port = 8200
     for idx, line in enumerate(lines):
         mode = (line.get("mode") or "direct").lower()

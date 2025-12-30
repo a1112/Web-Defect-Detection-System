@@ -208,9 +208,10 @@ class ImageService:
             and expand == self.disk_cache.defect_expand
         ):
             surface_root = self._surface_root(surface)
+            cache_root = self._cache_root(surface)
             seq_no_fs = self._resolve_seq_no_for_fs(surface_root, defect.seq_no)
             disk = self.disk_cache.read_defect(
-                surface_root,
+                cache_root,
                 seq_no_fs,
                 view=None,
                 surface=surface,
@@ -236,7 +237,7 @@ class ImageService:
             and expand == self.disk_cache.defect_expand
         ):
             self.disk_cache.write_defect(
-                self._surface_root(surface),
+                self._cache_root(surface),
                 self._resolve_seq_no_for_fs(self._surface_root(surface), defect.seq_no),
                 view=None,
                 surface=surface,
@@ -333,6 +334,7 @@ class ImageService:
         view_dir = view or self.settings.images.default_view
         tile_size = self.settings.images.frame_height
         surface_root = self._surface_root(surface)
+        cache_root = self._cache_root(surface)
         seq_no_fs = self._resolve_seq_no_for_fs(surface_root, seq_no)
         orientation = (orientation or "vertical").lower()
         if orientation not in {"horizontal", "vertical"}:
@@ -347,7 +349,7 @@ class ImageService:
         data: Optional[bytes] = None
         if fmt.upper() == "JPEG":
             disk = self.disk_cache.read_tile(
-                surface_root,
+                cache_root,
                 seq_no_fs,
                 view=view_dir,
                 level=level,
@@ -480,8 +482,8 @@ class ImageService:
             data = encode_image(tile_img, fmt=fmt)
             self.tile_cache.put(cache_key, data)
             if fmt.upper() == "JPEG":
-                    self.disk_cache.write_tile(
-                    surface_root,
+                self.disk_cache.write_tile(
+                    cache_root,
                     seq_no_fs,
                     view=view_dir,
                     level=level,
@@ -726,7 +728,7 @@ class ImageService:
 
         while not self._disk_cache_stop.is_set():
             for surface in ("top", "bottom"):
-                root = self._surface_root(surface)
+                root = self._cache_root(surface)
                 for seq in self._list_seq_dirs(root)[-20:]:
                     try:
                         self.disk_cache.cleanup_seq(root, seq, view=view_dir)
@@ -844,6 +846,14 @@ class ImageService:
             return self.settings.images.top_root
         if surface == "bottom":
             return self.settings.images.bottom_root
+        raise ValueError(f"Unknown surface '{surface}'")
+
+    def _cache_root(self, surface: str) -> Path:
+        surface = surface.lower()
+        if surface == "top":
+            return self.settings.images.disk_cache_top_root or self.settings.images.top_root
+        if surface == "bottom":
+            return self.settings.images.disk_cache_bottom_root or self.settings.images.bottom_root
         raise ValueError(f"Unknown surface '{surface}'")
 
     def _list_frame_paths(self, surface: str, seq_no: int, view: str) -> List[Path]:
