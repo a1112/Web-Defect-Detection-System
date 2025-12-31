@@ -38,6 +38,15 @@ LINE_PORT_ENV = "DEFECT_LINE_PORT"
 HEARTBEAT_INTERVAL_ENV = "DEFECT_CONFIG_HEARTBEAT_INTERVAL_SECONDS"
 
 
+class _SuppressAccessLogFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        return " /config/api_status " not in message
+
+
+logging.getLogger("uvicorn.access").addFilter(_SuppressAccessLogFilter())
+
+
 def _resolve_status_url(base_url: str) -> str:
     cleaned = base_url.rstrip("/")
     if cleaned.endswith("/config"):

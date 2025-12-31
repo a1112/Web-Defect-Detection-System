@@ -1,4 +1,9 @@
 {
+  "meta": {
+    "connection_mode": "production",
+    "api_base_url": "http://127.0.0.1:8120/api",
+    "service_name": "Defect Detection"
+  },
   "defaults": {
     "database": {
       "drive": "mysql",
@@ -20,7 +25,12 @@
     }
   },
   "lines": [
-    { "name": "本地测试数据",
-      "key": "test","mode": "direct", "ip": "127.0.0.1", "port": 8120 }
+    {
+      "name": "本地测试数据",
+      "key": "test",
+      "mode": "direct",
+      "ip": "127.0.0.1",
+      "port": 8120
+    }
   ]
 }

@@ -1,4 +1,9 @@
 {
+  "meta": {
+    "connection_mode": "production",
+    "api_base_url": "http://127.0.0.1:8120/api",
+    "service_name": "Defect Detection"
+  },
   "defaults": {
     "database": {
       "drive": "mysql",
@@ -32,21 +37,21 @@
       "mode": "direct",
       "ip": "172.25.2.99",
       "port": 8201,
-       "key": "sc_10"
+      "key": "sc_10"
     },
     {
       "name": "11#生产线",
       "mode": "direct",
       "ip": "172.25.2.98",
       "port": 8202,
-       "key": "sc_11"
+      "key": "sc_11"
     },
     {
       "name": "11#矫直线",
       "mode": "direct",
       "ip": "172.25.2.98",
       "port": 8203,
-       "key": "jz_11"
+      "key": "jz_11"
     },
     {
       "name": "12#生产线",

@@ -2,20 +2,23 @@ from __future__ import annotations
 
 from typing import Any
 from pathlib import Path
+from datetime import datetime
+import asyncio
+import json
 import os
 import platform
 import socket
 import sys
 import time
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 
 from app.server import deps
 from app.server.rbac import manager as rbac_manager
-from app.server.net_table import load_map_config
+from app.server.net_table import load_map_config, load_map_payload, resolve_net_table_dir
 
 router = APIRouter(tags=["admin"])
 
@@ -146,6 +149,76 @@ def _get_resource_metrics() -> dict[str, Any]:
     else:
         metrics["notes"].append("platform_metrics_unavailable")
     return metrics
+
+
+def _get_disk_usage() -> list[dict[str, Any]]:
+    try:
+        import psutil  # type: ignore
+    except Exception:
+        return []
+
+    disks: list[dict[str, Any]] = []
+    for part in psutil.disk_partitions(all=False):
+        try:
+            usage = psutil.disk_usage(part.mountpoint)
+        except OSError:
+            continue
+        disks.append(
+            {
+                "device": part.device,
+                "mountpoint": part.mountpoint,
+                "fstype": part.fstype,
+                "total_bytes": usage.total,
+                "used_bytes": usage.used,
+                "free_bytes": usage.free,
+                "percent": usage.percent,
+            }
+        )
+    return disks
+
+
+def _build_network_interfaces(
+    now_counters: dict[str, Any],
+    stats: dict[str, Any],
+    prev_counters: dict[str, Any] | None,
+    delta_seconds: float | None,
+) -> list[dict[str, Any]]:
+    interfaces: list[dict[str, Any]] = []
+    for name, counters in now_counters.items():
+        stat = stats.get(name)
+        rx_rate = None
+        tx_rate = None
+        if prev_counters and delta_seconds and delta_seconds > 0:
+            prev = prev_counters.get(name)
+            if prev:
+                rx_rate = max(0.0, (counters.bytes_recv - prev.bytes_recv) / delta_seconds)
+                tx_rate = max(0.0, (counters.bytes_sent - prev.bytes_sent) / delta_seconds)
+        interfaces.append(
+            {
+                "name": name,
+                "is_up": bool(stat.isup) if stat else False,
+                "speed_mbps": stat.speed if stat else None,
+                "rx_bytes_per_sec": rx_rate,
+                "tx_bytes_per_sec": tx_rate,
+            }
+        )
+    return interfaces
+
+
+def _get_network_interfaces(sample_seconds: float = 0.1) -> list[dict[str, Any]]:
+    try:
+        import psutil  # type: ignore
+    except Exception:
+        return []
+
+    try:
+        stats = psutil.net_if_stats()
+        io1 = psutil.net_io_counters(pernic=True)
+        time.sleep(sample_seconds)
+        io2 = psutil.net_io_counters(pernic=True)
+        return _build_network_interfaces(io2, stats, io1, sample_seconds)
+    except Exception:
+        return []
 
 
 def _check_database(session_factory):
@@ -311,6 +384,8 @@ def get_system_info():
             "python_executable": sys.executable,
         },
         "resources": _get_resource_metrics(),
+        "disks": _get_disk_usage(),
+        "network_interfaces": _get_network_interfaces(),
     }
     return response
 
@@ -318,6 +393,79 @@ def get_system_info():
 @router.get("/system-info")
 def get_system_info_alias():
     return get_system_info()
+
+
+@router.get("/mate")
+def get_config_mate():
+    root = resolve_net_table_dir()
+    map_path = root / "map.json"
+    if map_path.exists() and map_path.stat().st_size > 0:
+        try:
+            payload = json.loads(map_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=500, detail=f"Invalid map.json: {exc}") from exc
+    else:
+        _, fallback = load_map_payload()
+        payload = {"defaults": fallback.get("defaults") or {}, "lines": fallback.get("lines") or []}
+    return {"path": str(map_path), "payload": payload}
+
+
+@router.websocket("/ws/system-metrics")
+async def ws_system_metrics(websocket: WebSocket):
+    await websocket.accept()
+    interval = 1.0
+    prev_counters: dict[str, Any] | None = None
+    prev_ts: float | None = None
+    try:
+        while True:
+            now_ts = time.time()
+            try:
+                import psutil  # type: ignore
+            except Exception:
+                payload = {
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "resources": _get_resource_metrics(),
+                    "disks": _get_disk_usage(),
+                    "network_interfaces": [],
+                }
+                await websocket.send_json(payload)
+                await asyncio.sleep(interval)
+                continue
+
+            counters = psutil.net_io_counters(pernic=True)
+            stats = psutil.net_if_stats()
+            delta = now_ts - prev_ts if prev_ts is not None else None
+            interfaces = _build_network_interfaces(counters, stats, prev_counters, delta)
+
+            rx_rates = [item["rx_bytes_per_sec"] for item in interfaces if item["rx_bytes_per_sec"] is not None]
+            tx_rates = [item["tx_bytes_per_sec"] for item in interfaces if item["tx_bytes_per_sec"] is not None]
+            metrics = {
+                "cpu_percent": psutil.cpu_percent(interval=None),
+                "memory_percent": None,
+                "memory_total_bytes": None,
+                "memory_used_bytes": None,
+                "network_rx_bytes_per_sec": sum(rx_rates) if rx_rates else None,
+                "network_tx_bytes_per_sec": sum(tx_rates) if tx_rates else None,
+                "notes": [],
+            }
+            vm = psutil.virtual_memory()
+            metrics["memory_percent"] = vm.percent
+            metrics["memory_total_bytes"] = vm.total
+            metrics["memory_used_bytes"] = vm.total - vm.available
+
+            payload = {
+                "timestamp": datetime.utcnow().isoformat(),
+                "resources": metrics,
+                "disks": _get_disk_usage(),
+                "network_interfaces": interfaces,
+            }
+            await websocket.send_json(payload)
+
+            prev_counters = counters
+            prev_ts = now_ts
+            await asyncio.sleep(interval)
+    except WebSocketDisconnect:
+        return
 
 
 @router.get("/admin/users")
