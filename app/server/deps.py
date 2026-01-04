@@ -46,6 +46,10 @@ def get_settings() -> ServerSettings:
                 update={
                     "top_root": image_root,
                     "bottom_root": image_root,
+                    # In TestData mode, prefer local disk cache data
+                    # by pointing disk cache roots to the same Image tree.
+                    "disk_cache_top_root": image_root,
+                    "disk_cache_bottom_root": image_root,
                 }
             ),
         }
