@@ -7,13 +7,14 @@ from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, FastAPI, HTTPException
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.server.api import admin
 from app.server.net_table import load_map_payload, save_map_payload
+from app.server.utils.speed_test import make_speed_test_response
 
 logger = logging.getLogger(__name__)
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -127,23 +128,7 @@ def create_app(manager: ProcessManager) -> FastAPI:
 
     @router.get("/speed_test")
     def speed_test(chunk_kb: int = 256, total_mb: int = 64) -> StreamingResponse:
-        size_kb = max(32, min(4096, int(chunk_kb)))
-        total_mb = max(1, min(4096, int(total_mb)))
-        total_bytes = total_mb * 1024 * 1024
-        chunk = bytes(size_kb * 1024)
-        mv = memoryview(chunk)
-
-        def iter_chunks():
-            remaining = total_bytes
-            while remaining > 0:
-                size = min(remaining, len(mv))
-                yield mv[:size]
-                remaining -= size
-
-        response = StreamingResponse(iter_chunks(), media_type="application/octet-stream")
-        response.headers["Cache-Control"] = "no-store"
-        response.headers["Content-Length"] = str(total_bytes)
-        return response
+        return make_speed_test_response(chunk_kb=chunk_kb, total_mb=total_mb)
 
     @router.post("/restart")
     def restart_all() -> dict[str, Any]:
