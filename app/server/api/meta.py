@@ -47,6 +47,7 @@ def api_meta():
         "defect_classes": defect_classes,
         "tile": tile_meta,
         "image": image_meta,
+        "defect_cache_expand": images.defect_cache_expand,
     }
 
 

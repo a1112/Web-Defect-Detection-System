@@ -151,6 +151,10 @@ def api_tile_image(
     tile_x: int = Query(..., ge=0),
     tile_y: int = Query(..., ge=0),
     orientation: str = Query(default="vertical", pattern="^(horizontal|vertical)$"),
+    prefetch: Optional[str] = Query(default=None),
+    prefetch_x: Optional[float] = Query(default=None),
+    prefetch_y: Optional[float] = Query(default=None),
+    prefetch_image_index: Optional[int] = Query(default=None, ge=0),
     fmt: str = Query(default="JPEG"),
     viewer_id: Optional[str] = Header(default=None, alias="X-Viewer-Id"),
     service: ImageService = Depends(get_image_service),
@@ -177,6 +181,16 @@ def api_tile_image(
             orientation=orientation,
             fmt=fmt,
             viewer_id=resolved_viewer_id,
+            prefetch=(
+                {
+                    "mode": prefetch,
+                    "x": prefetch_x,
+                    "y": prefetch_y,
+                    "image_index": prefetch_image_index,
+                }
+                if prefetch
+                else None
+            ),
         )
         headers = {
             "X-Tile-Level": str(level),

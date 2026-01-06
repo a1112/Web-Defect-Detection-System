@@ -411,6 +411,7 @@ class ImageService:
         orientation: str = "vertical",
         fmt: str = "JPEG",
         viewer_id: Optional[str] = None,
+        prefetch: Optional[dict] = None,
     ) -> bytes:
         return self._get_tile_impl(
             surface=surface,
@@ -423,6 +424,7 @@ class ImageService:
             fmt=fmt,
             trigger_prefetch=True,
             viewer_id=(viewer_id or ""),
+            prefetch=prefetch,
         )
 
     def _get_tile_impl(
@@ -438,6 +440,7 @@ class ImageService:
         fmt: str,
         trigger_prefetch: bool,
         viewer_id: str,
+        prefetch: Optional[dict] = None,
     ) -> bytes:
         view_dir = view or self.settings.images.default_view
         tile_size = self.settings.images.frame_height
@@ -610,6 +613,8 @@ class ImageService:
                 level=level,
                 tile_x=tile_x,
                 tile_y=tile_y,
+                prefetch=prefetch,
+                orientation=orientation,
             )
         return data
 
@@ -621,6 +626,60 @@ class ImageService:
         self._tile_prefetch.start()
         self._tile_prefetch_started = True
 
+    def _resolve_defect_prefetch_tile(
+        self,
+        *,
+        surface: str,
+        seq_no: int,
+        view: str,
+        level: int,
+        orientation: str,
+        x: float,
+        y: float,
+        image_index: int,
+    ) -> Optional[tuple[int, int]]:
+        frames = self._list_frame_paths(surface, seq_no, view)
+        if not frames:
+            return None
+        first_img = self._load_frame_from_path(frames[0])
+        frame_w, frame_h = first_img.width, first_img.height
+        frame_count = len(frames)
+        if image_index < 0 or image_index >= frame_count:
+            return None
+
+        orientation = (orientation or "vertical").lower()
+        if orientation == "horizontal":
+            stripe_w = frame_h
+            stripe_h = frame_w
+            mosaic_width = stripe_w * frame_count
+            mosaic_height = stripe_h
+            world_x = image_index * stripe_w + y
+            world_y = frame_w - x
+        else:
+            stripe_w = frame_w
+            stripe_h = frame_h
+            mosaic_width = stripe_w
+            mosaic_height = stripe_h * frame_count
+            world_x = x
+            world_y = image_index * stripe_h + y
+
+        if world_x < 0 or world_y < 0 or world_x >= mosaic_width or world_y >= mosaic_height:
+            return None
+
+        tile_size = self.settings.images.frame_height
+        virtual_tile_size = tile_size * (2**level)
+        if virtual_tile_size <= 0:
+            return None
+
+        tiles_x = max(1, int(math.ceil(mosaic_width / virtual_tile_size)))
+        tiles_y = max(1, int(math.ceil(mosaic_height / virtual_tile_size)))
+        tile_x = int(world_x // virtual_tile_size)
+        tile_y = int(world_y // virtual_tile_size)
+        if tile_x < 0 or tile_y < 0 or tile_x >= tiles_x or tile_y >= tiles_y:
+            return None
+
+        return tile_x, tile_y
+
     def _schedule_tile_prefetch(
         self,
         *,
@@ -631,6 +690,8 @@ class ImageService:
         level: int,
         tile_x: int,
         tile_y: int,
+        prefetch: Optional[dict] = None,
+        orientation: str = "vertical",
     ) -> None:
         manager = self._tile_prefetch
         if manager is None:
@@ -654,6 +715,65 @@ class ImageService:
 
         scheduled: list[tuple[int, int, int]] = []
         seq_warm: list[tuple[int, int, int]] = []
+
+        prefetch_mode = None
+        if prefetch and isinstance(prefetch, dict):
+            prefetch_mode = str(prefetch.get("mode") or "").strip().lower()
+        if prefetch_mode == "defect":
+            px = prefetch.get("x") if isinstance(prefetch, dict) else None
+            py = prefetch.get("y") if isinstance(prefetch, dict) else None
+            image_index = prefetch.get("image_index") if isinstance(prefetch, dict) else None
+            if px is None or py is None or image_index is None:
+                return
+            try:
+                target = self._resolve_defect_prefetch_tile(
+                    surface=surface,
+                    seq_no=seq_no,
+                    view=view,
+                    level=level,
+                    orientation=orientation,
+                    x=float(px),
+                    y=float(py),
+                    image_index=int(image_index),
+                )
+            except Exception:
+                logger.exception(
+                    "tile-prefetch defect target failed seq=%s surface=%s view=%s",
+                    seq_no,
+                    surface,
+                    view,
+                )
+                return
+            if target is None:
+                return
+            target_x, target_y = target
+            manager.enqueue_tile(
+                TileRequest(
+                    viewer_id=viewer_id,
+                    surface=surface,
+                    seq_no=seq_no,
+                    view=view,
+                    level=level,
+                    tile_x=target_x,
+                    tile_y=target_y,
+                ),
+                priority=0,
+            )
+            scheduled.append((level, target_x, target_y))
+            if settings.tile_prefetch_log_enabled and settings.tile_prefetch_log_detail == "summary":
+                prefetch_logger.info(
+                    "tile-prefetch defect viewer=%s %s seq=%s view=%s req_level=%s hint=(%s,%s,%s) tiles=%s",
+                    viewer_id,
+                    surface,
+                    seq_no,
+                    view,
+                    level,
+                    px,
+                    py,
+                    image_index,
+                    scheduled,
+                )
+            return
 
         # Same-level adjacent tiles (configurable, default 1).
         neighbor_count = int(settings.tile_prefetch_adjacent_tile_count)
