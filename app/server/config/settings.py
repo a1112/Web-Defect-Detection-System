@@ -64,6 +64,17 @@ class ImageSettings(BaseModel):
     max_cached_mosaics: int = Field(default=8, ge=1)
     max_cached_defect_crops: int = Field(default=256, ge=1)
     cache_ttl_seconds: int = Field(default=120, ge=1)
+    # 缺陷缓存相关：是否启用以及默认裁剪扩展像素（缺陷缓存最大裁剪保留）
+    defect_cache_enabled: bool = Field(
+        default=True,
+        description="是否启用缺陷裁剪结果的磁盘缓存（依赖 disk_cache_enabled 一并生效）。",
+    )
+    defect_cache_expand: int = Field(
+        default=100,
+        ge=0,
+        le=512,
+        description="缺陷缓存最大裁剪保留：缺陷裁剪时的默认扩展像素。",
+    )
 
     tile_prefetch_enabled: bool = Field(default=True)
     tile_prefetch_workers: int = Field(default=2, ge=1)

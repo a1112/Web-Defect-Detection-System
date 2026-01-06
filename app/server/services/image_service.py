@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 import json
 
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 from ..config.settings import ImageSettings, ServerSettings
 from ..cache import DiskImageCache, TtlLruCache
@@ -57,7 +57,8 @@ class ImageService:
             flat_layout=False,
             max_tiles=image_settings.disk_cache_max_tiles,
             max_defects=image_settings.disk_cache_max_defects,
-            defect_expand=32,
+            # 缺陷缓存最大裁剪保留来自配置
+            defect_expand=int(getattr(image_settings, "defect_cache_expand", 100) or 100),
             tile_size=image_settings.frame_height,
             frame_width=image_settings.frame_width,
             frame_height=image_settings.frame_height,
@@ -76,6 +77,52 @@ class ImageService:
                 log_enabled=bool(image_settings.tile_prefetch_log_enabled),
                 log_detail=str(image_settings.tile_prefetch_log_detail),
             )
+
+        # 缓存错误图像的编码结果，避免重复绘制与编码
+        self._error_image_cache: dict[tuple[str, str], bytes] = {}
+
+    # ------------------------------------------------------------------ #
+    # Defect warmup helpers
+    # ------------------------------------------------------------------ #
+    def warmup_defects_for_seq(self, seq_no: int, surface: Optional[str] = None) -> None:
+        """
+        预热指定钢板的全部缺陷小图：
+        - 优先命中内存缓存 / 磁盘缓存；
+        - 若缺失，再从原图裁剪并写入磁盘缓存，
+          以便后续前端请求时尽量不再经过 Pillow/OpenCV 的在线裁剪。
+        """
+        images = self.settings.images
+        if not getattr(images, "disk_cache_enabled", False) or not getattr(images, "defect_cache_enabled", True):
+            return
+        try:
+            # surface=None 时同时预热 top/bottom，两侧的缺陷记录都会返回
+            resp = self.defect_service.defects_by_seq(seq_no, surface=surface)
+        except Exception:
+            logger.exception("warmup defects: load defect list failed seq=%s surface=%s", seq_no, surface)
+            return
+
+        default_expand = self.disk_cache.defect_expand
+        for item in resp.items:
+            try:
+                # 仅预热标准 JPEG + 默认扩展像素的小图，便于前端直接复用。
+                self.crop_defect(
+                    surface=item.surface,
+                    defect_id=item.defect_id,
+                    expand=default_expand,
+                    width=None,
+                    height=None,
+                    fmt="JPEG",
+                )
+            except FileNotFoundError:
+                # 对单个缺陷缺图容忍，继续预热其他记录
+                continue
+            except Exception:
+                logger.exception(
+                    "warmup defects: crop failed seq=%s surface=%s defect_id=%s",
+                    seq_no,
+                    item.surface,
+                    item.defect_id,
+                )
 
     def start_background_workers(self) -> None:
         image_settings = self.settings.images
@@ -187,11 +234,15 @@ class ImageService:
         surface: str,
         defect_id: int,
         *,
-        expand: int = 0,
+        expand: Optional[int] = None,
         width: Optional[int] = None,
         height: Optional[int] = None,
         fmt: str = "JPEG",
     ) -> Tuple[bytes, DefectRecord]:
+        # 若未显式指定扩展像素，则使用配置中的缺陷缓存扩展像素
+        if expand is None:
+            expand = self.disk_cache.defect_expand
+
         cache_key = (surface, defect_id, expand, width, height, fmt)
         cached = self.defect_crop_cache.get(cache_key)
         if cached is not None:
@@ -200,6 +251,33 @@ class ImageService:
         defect = self.defect_service.find_defect_by_surface(surface, defect_id)
         if not defect or defect.image_index is None:
             raise FileNotFoundError(f"Defect {defect_id} not found on {surface}")
+
+        # 坐标体系说明：
+        # - leftInSrcImg/... 一列表示在“原始源图像”上的像素坐标（单帧）——这是可信坐标。
+        # - leftInImg/... 已弃用，不再直接用于裁剪。
+        # 这里优先使用 bbox_source（来源于 leftInSrcImg 等），
+        # 在 SMALL 实例下再根据 pixel_scale 做缩放，使之适配当前实例实际帧尺寸。
+        base_bbox = defect.bbox_source or defect.bbox_image
+        if base_bbox is None:
+            raise FileNotFoundError(f"Defect {defect_id} bbox not available on {surface}")
+
+        # 根据当前实例的 pixel_scale（例如 SMALL 模式下为 0.5）缩放坐标
+        try:
+            scale = float(getattr(self.settings.images, "pixel_scale", 1.0))
+        except Exception:
+            scale = 1.0
+        if scale <= 0:
+            scale = 1.0
+
+        # 计算用于磁盘缓存文件名的“源坐标 + 扩展配置”键，确保同一缺陷在同一配置下命中。
+        width_src = max(0, base_bbox.right - base_bbox.left)
+        height_src = max(0, base_bbox.bottom - base_bbox.top)
+        surface_code = "t" if surface.lower() == "top" else "b"
+        # 磁盘文件名主体：{seq_no}_{t/b}_{defect_id}_{leftInSrcImg}_{topInSrcImg}_{宽度}_{高度}_{defect_cache_expand}
+        disk_defect_id = (
+            f"{defect.seq_no}_{surface_code}_{defect.defect_id}_"
+            f"{base_bbox.left}_{base_bbox.top}_{width_src}_{height_src}_{self.disk_cache.defect_expand}"
+        )
 
         if (
             fmt.upper() == "JPEG"
@@ -215,15 +293,45 @@ class ImageService:
                 seq_no_fs,
                 view=None,
                 surface=surface,
-                defect_id=defect_id,
+                defect_id=disk_defect_id,
             )
             if disk is not None:
                 result = (disk, defect)
                 self.defect_crop_cache.put(cache_key, result)
                 return result
 
-        image = self._load_frame(surface, defect.seq_no, defect.image_index)
-        box = (defect.bbox_image.left, defect.bbox_image.top, defect.bbox_image.right, defect.bbox_image.bottom)
+        try:
+            image = self._load_frame(surface, defect.seq_no, defect.image_index)
+        except FileNotFoundError:
+            # 原始帧不存在，返回默认错误图像（缓存后的二进制）
+            payload = self._error_image_bytes("原图丢失\nDEFECT IMAGE MISSING", fmt=fmt)
+            result = (payload, defect)
+            self.defect_crop_cache.put(cache_key, result)
+            return result
+
+        # 如果源坐标完全落在图像范围外，则直接返回错误图像
+        if (
+            base_bbox.right <= 0
+            or base_bbox.bottom <= 0
+            or base_bbox.left >= image.width
+            or base_bbox.top >= image.height
+        ):
+            payload = self._error_image_bytes("坐标越界\nBBOX OUT OF RANGE", fmt=fmt)
+            result = (payload, defect)
+            self.defect_crop_cache.put(cache_key, result)
+            return result
+        if scale != 1.0:
+            left = int(round(base_bbox.left * scale))
+            top = int(round(base_bbox.top * scale))
+            right = int(round(base_bbox.right * scale))
+            bottom = int(round(base_bbox.bottom * scale))
+        else:
+            left = base_bbox.left
+            top = base_bbox.top
+            right = base_bbox.right
+            bottom = base_bbox.bottom
+
+        box = (left, top, right, bottom)
         box = expand_box(box, expand, image.width, image.height)
         cropped = image.crop(box)
         if width or height:
@@ -241,7 +349,7 @@ class ImageService:
                 self._resolve_seq_no_for_fs(self._surface_root(surface), defect.seq_no),
                 view=None,
                 surface=surface,
-                defect_id=defect_id,
+                defect_id=disk_defect_id,
                 payload=payload,
             )
         self.defect_crop_cache.put(cache_key, result)
@@ -707,6 +815,12 @@ class ImageService:
         last_seq_by_surface: dict[str, int] = {"top": 0, "bottom": 0}
 
         while not self._disk_cache_stop.is_set():
+            # 先根据 cache.json 与当前配置比对，补充/刷新已有缓存
+            try:
+                self._refresh_disk_cache_meta(precache_levels=precache_levels)
+            except Exception:
+                logger.exception("disk-cache meta refresh 失败")
+
             for surface in ("top", "bottom"):
                 root = self._surface_root(surface)
                 max_seq = self._find_max_seq(root)
@@ -770,6 +884,37 @@ class ImageService:
                     )
         logger.info("disk-cache precache %s/%s/%s 完成", surface, seq_no, view_dir)
 
+    def _refresh_disk_cache_meta(self, *, precache_levels: int) -> None:
+        """
+        根据 cache.json 与当前服务配置比对，决定是否对已有钢板序列进行补充缓存。
+        典型场景：配置中的最大层级 / 扩展像素调整后，对历史钢板进行补齐。
+        """
+        view_dir = self.settings.images.default_view
+        current_max_level = self.disk_cache.max_level()
+        for surface in ("top", "bottom"):
+            cache_root = self._cache_root(surface)
+            # 仅针对最近若干序列，避免一次性全量扫描
+            for seq in self._list_seq_dirs(cache_root)[-50:]:
+                meta = self.disk_cache.read_meta(cache_root, seq, view=view_dir)
+                if not meta:
+                    continue
+                meta_tile = (meta.get("tile") or {})
+                meta_defects = (meta.get("defects") or {})
+                meta_max_level = int(meta_tile.get("max_level") or 0)
+                meta_expand = int(meta_defects.get("expand") or 0)
+                # 如果当前配置支持更多层级或更大的缺陷扩展，则触发补充缓存
+                needs_precache = False
+                if current_max_level > meta_max_level:
+                    needs_precache = True
+                if self.disk_cache.defect_expand != meta_expand:
+                    needs_precache = True
+                if not needs_precache:
+                    continue
+                try:
+                    self._precache_seq(surface, seq, precache_levels=precache_levels)
+                except Exception:
+                    logger.exception("disk-cache refresh 失败 surface=%s seq=%s", surface, seq)
+
     @staticmethod
     def _list_seq_dirs(root: Path) -> list[int]:
         if not root.exists():
@@ -818,6 +963,90 @@ class ImageService:
         height = int(getattr(self.settings.images, "frame_height", 1024) or 1024)
         mode = self.mode or "RGB"
         return Image.new(mode, (width, height), 0)
+
+    def _error_image(self, message: str = "ERROR", *, width: int = 256, height: int = 256) -> Image.Image:
+        """
+        默认错误图像：用于原图缺失或裁剪范围完全越界时的占位。
+
+        设计：深色背景 + 红色边框 + 居中红色错误文案（支持简单多行）。
+        """
+        mode = self.mode or "RGB"
+        try:
+            image = Image.new(mode, (width, height), (20, 20, 20))
+        except Exception:
+            image = Image.new("RGB", (width, height), (20, 20, 20))
+        draw = ImageDraw.Draw(image)
+
+        # 红色边框
+        border_color = (220, 20, 60)
+        for offset in (0, 1):
+            draw.rectangle(
+                [offset, offset, width - 1 - offset, height - 1 - offset],
+                outline=border_color,
+                width=1,
+            )
+
+        # 文本：支持简单多行，居中绘制
+        # 优先尝试加载系统中的中文字体，这样错误信息里的中文不会变成方块。
+        try:
+            font: Optional[ImageFont.ImageFont] = None
+            # Windows 常见中文字体路径
+            font_candidates = [
+                Path("C:/Windows/Fonts/msyh.ttc"),
+                Path("C:/Windows/Fonts/simhei.ttf"),
+                Path("C:/Windows/Fonts/simsun.ttc"),
+            ]
+            for candidate in font_candidates:
+                if candidate.exists():
+                    font = ImageFont.truetype(str(candidate), 16)
+                    break
+            if font is None:
+                font = ImageFont.load_default()
+        except Exception:
+            font = None  # Pillow 会用内置字体
+
+        lines = str(message or "ERROR").splitlines() or ["ERROR"]
+        line_heights: list[int] = []
+        line_widths: list[int] = []
+
+        def _measure(line: str) -> tuple[int, int]:
+            # Pillow 版本兼容：优先用 textbbox，其次 font.getsize，最后估算
+            if hasattr(draw, "textbbox"):
+                bbox = draw.textbbox((0, 0), line, font=font)
+                return max(1, bbox[2] - bbox[0]), max(1, bbox[3] - bbox[1])
+            if font is not None and hasattr(font, "getsize"):
+                w, h = font.getsize(line)
+                return max(1, w), max(1, h)
+            return max(1, len(line) * 8), 12
+
+        for line in lines:
+            w, h = _measure(line)
+            line_widths.append(w)
+            line_heights.append(h)
+        total_height = sum(line_heights) + max(0, (len(lines) - 1) * 4)
+
+        current_y = (height - total_height) // 2
+        for idx, line in enumerate(lines):
+            w = line_widths[idx]
+            h = line_heights[idx]
+            x = (width - w) // 2
+            draw.text((x, current_y), line, fill=border_color, font=font)
+            current_y += h + 4
+
+        return image
+
+    def _error_image_bytes(self, message: str, fmt: str = "JPEG", *, width: int = 256, height: int = 256) -> bytes:
+        """
+        获取带有给定错误消息的占位图二进制数据（带简单内存缓存）。
+        """
+        key = (str(message or "ERROR"), fmt.upper())
+        cached = self._error_image_cache.get(key)
+        if cached is not None:
+            return cached
+        image = self._error_image(message, width=width, height=height)
+        payload = encode_image(image, fmt=fmt)
+        self._error_image_cache[key] = payload
+        return payload
 
     @staticmethod
     def _resolve_frame_path(root: Path, seq_no: int, view_dir: str, image_index: int, ext: str) -> Path:

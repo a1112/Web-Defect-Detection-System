@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Optional
+import threading
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
@@ -34,6 +35,7 @@ def api_defects(
 
     for record in base.items:
         bbox = record.bbox_source or record.bbox_image
+        bbox_obj = record.bbox_object
 
         if scale != 1.0 and bbox is not None:
             left = int(round(bbox.left * scale))
@@ -50,6 +52,17 @@ def api_defects(
 
         width = max(0, right - left)
         height = max(0, bottom - top)
+
+        # 物理坐标（mm），来自 bbox_object，对应 leftInObj/...，只用于前端展示，不参与裁剪。
+        if bbox_obj is not None:
+            left_mm = bbox_obj.left
+            top_mm = bbox_obj.top
+            right_mm = bbox_obj.right
+            bottom_mm = bbox_obj.bottom
+            width_mm = max(0, right_mm - left_mm)
+            height_mm = max(0, bottom_mm - top_mm)
+        else:
+            left_mm = top_mm = width_mm = height_mm = None
         defect_type = defect_class_label(record.class_id)
         severity = grade_to_severity(record.grade)
         defects.append(
@@ -64,6 +77,10 @@ def api_defects(
                 confidence=1.0,
                 surface=record.surface,  # type: ignore[arg-type]
                 image_index=record.image_index or 0,
+                x_mm=left_mm,
+                y_mm=top_mm,
+                width_mm=width_mm,
+                height_mm=height_mm,
             )
         )
 
@@ -73,6 +90,18 @@ def api_defects(
         total_count=len(defects),
         surface_images=None,
     )
+
+    # NOTE: 传统模式缺陷分析界面通常会在获取缺陷列表后立即请求各缺陷小图。
+    # 这里在后台线程中预热该板所有缺陷小图，尽量保证前端随后请求
+    # /api/images/defect/{defect_id} 时直接命中磁盘缓存，而不是在线裁剪。
+    if getattr(image_service.settings.images, "disk_cache_enabled", False) and getattr(
+        image_service.settings.images, "defect_cache_enabled", True
+    ):
+        threading.Thread(
+            target=image_service.warmup_defects_for_seq,
+            args=(seq_no, surface),
+            daemon=True,
+        ).start()
 
 
 @router.get("/defect-classes")

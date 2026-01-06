@@ -18,10 +18,10 @@ class Camdefect1(Base):
     seqNo = Column(Integer, nullable=False, index=True, comment="钢板序列号（流水号）")
     imgIndex = Column(Integer, comment="所在帧图像索引，线扫相机")
     defectClass = Column(Integer, comment="缺陷类别编号")
-    leftInImg = Column(Integer, comment="在当前帧图像中的左边界像素坐标")
-    rightInImg = Column(Integer, comment="在当前帧图像中的右边界像素坐标")
-    topInImg = Column(Integer, comment="在当前帧图像中的上边界像素坐标")
-    bottomInImg = Column(Integer, comment="在当前帧图像中的下边界像素坐标")
+    leftInImg = Column(Integer, comment="在当前帧图像中的左边界像素坐标")  # 弃用
+    rightInImg = Column(Integer, comment="在当前帧图像中的右边界像素坐标") # 弃用
+    topInImg = Column(Integer, comment="在当前帧图像中的上边界像素坐标")   # 弃用
+    bottomInImg = Column(Integer, comment="在当前帧图像中的下边界像素坐标")# 弃用
     leftInSrcImg = Column(Integer, comment="在原始源图像中的左边界像素坐标")
     rightInSrcImg = Column(Integer, comment="在原始源图像中的右边界像素坐标")
     topInSrcImg = Column(Integer, comment="在原始源图像中的上边界像素坐标")

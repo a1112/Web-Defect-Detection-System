@@ -90,10 +90,12 @@ class DiskImageCache:
         *,
         view: Optional[str],
         surface: str,
-        defect_id: int,
+        defect_id: str,
     ) -> Path:
         base = self.cache_dir(cache_root, seq_no, view)
-        return base / "defects" / surface.lower() / f"{defect_id}.jpg"
+        # 新目录规范：cache/{view}/defect/{seq}_{surface}_{left}_{top}_{w}_{h}_{expand}.jpg
+        # 这里 defect_id 已经是完整的文件名主体。
+        return base / "defect" / f"{defect_id}.jpg"
 
     def read_tile(
         self,
@@ -155,11 +157,12 @@ class DiskImageCache:
         *,
         view: Optional[str],
         surface: str,
-        defect_id: int,
+        defect_id: str,
     ) -> Optional[bytes]:
         if not self.enabled:
             return None
-        path = self.defect_path(cache_root, seq_no, view=view, surface=surface, defect_id=defect_id)
+        base = self.cache_dir(cache_root, seq_no, view)
+        path = base / "defect" / f"{defect_id}.jpg"
         try:
             return path.read_bytes() if path.exists() else None
         except OSError:
@@ -172,7 +175,7 @@ class DiskImageCache:
         *,
         view: Optional[str],
         surface: str,
-        defect_id: int,
+        defect_id: str,
         payload: bytes,
     ) -> None:
         if not self.enabled or self.read_only:
@@ -192,13 +195,26 @@ class DiskImageCache:
             return
         base = self.cache_dir(cache_root, seq_no, view)
         tile_dir = base / "tile"
-        defect_dir = base / "defects"
+        defect_dir = base / "defect"
         self._enforce_limit(tile_dir, self.max_tiles)
         self._enforce_limit(defect_dir, self.max_defects)
 
     # ------------------------------------------------------------------ #
     # Internal
     # ------------------------------------------------------------------ #
+    def read_meta(self, cache_root: Path, seq_no: int, *, view: Optional[str]) -> Optional[dict]:
+        """
+        读取指定序列的 cache.json 元数据；用于缓存刷新/补充逻辑。
+        """
+        base = self.cache_dir(cache_root, seq_no, view)
+        meta_path = base / "cache.json"
+        if not meta_path.exists():
+            return None
+        try:
+            return json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+
     def _ensure_cache_json(self, cache_root: Path, seq_no: int, *, view: Optional[str]) -> None:
         base = self.cache_dir(cache_root, seq_no, view)
         meta_path = base / "cache.json"
@@ -216,6 +232,7 @@ class DiskImageCache:
             "defects": {
                 "format": "JPEG",
                 "expand": self.defect_expand,
+                "enabled": bool(self.enabled),
             },
         }
         try:

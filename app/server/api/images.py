@@ -48,7 +48,8 @@ def api_frame_image(
 def api_defect_crop(
     defect_id: int,
     surface: str = Query(..., pattern="^(top|bottom)$"),
-    expand: int = Query(default=32, ge=0, le=512),
+    # 若不传 expand，后端将使用配置中的 defect_cache_expand 作为默认扩展像素
+    expand: Optional[int] = Query(default=None, ge=0, le=512),
     width: Optional[int] = Query(default=None, ge=1, le=4096),
     height: Optional[int] = Query(default=None, ge=1, le=4096),
     fmt: str = Query(default="JPEG"),

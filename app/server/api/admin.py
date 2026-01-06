@@ -32,6 +32,9 @@ NGINX_CONFIG_PATH = (
     / "conf"
     / "nginx.conf"
 )
+CONFIGS_DIR = REPO_ROOT / "configs"
+DEFAULT_SERVER_CONFIG_PATH = CONFIGS_DIR / "server.json"
+SMALL_SERVER_CONFIG_PATH = CONFIGS_DIR / "server_small.json"
 
 
 def _read_linux_cpu_times() -> tuple[int, int]:
@@ -211,6 +214,20 @@ def _get_network_interfaces(sample_seconds: float = 0.1) -> list[dict[str, Any]]
     except Exception:
         return []
 
+
+def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    """
+    递归合并字典：用于构建“模板 + defaults + line 覆盖”的最终配置，
+    以及按字段更新 server.json / map.json 中的 images 段。
+    """
+    result = dict(base or {})
+    for key, value in (override or {}).items():
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = _deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
+
     try:
         stats = psutil.net_if_stats()
         io1 = psutil.net_io_counters(pernic=True)
@@ -256,6 +273,32 @@ class UIConfigPayload(BaseModel):
 class MockDataPayload(BaseModel):
     config: dict[str, Any]
     templates: list[dict[str, Any]]
+
+
+class CacheTemplateUpdate(BaseModel):
+    default: dict[str, Any] | None = None
+    small: dict[str, Any] | None = None
+
+
+class CacheLineUpdate(BaseModel):
+    key: str = Field(..., description="产线 key（map.json lines[].key）")
+    images: dict[str, Any] | None = Field(
+        default=None,
+        description="写入 map.json 的 images 覆盖配置（部分字段更新）。",
+    )
+
+
+class CacheConfigUpdatePayload(BaseModel):
+    """
+    /config/cache 更新载荷：
+    - templates: 修改全局模板（configs/server.json / server_small.json 中的 images 字段，按 profile 区分）。
+    - defaults:  修改 map.json 中 defaults 段（通常继承到所有产线）。
+    - lines:     按 key 修改对应产线的 images 覆盖字段。
+    """
+
+    templates: CacheTemplateUpdate | None = None
+    defaults: dict[str, Any] | None = None
+    lines: list[CacheLineUpdate] | None = None
 
 
 class UserCreatePayload(BaseModel):
@@ -408,6 +451,170 @@ def get_config_mate():
         _, fallback = load_map_payload()
         payload = {"defaults": fallback.get("defaults") or {}, "lines": fallback.get("lines") or []}
     return {"path": str(map_path), "payload": payload}
+
+
+def _load_template_images() -> dict[str, dict[str, Any]]:
+    """
+    加载全局模板 server.json / server_small.json 中的 images 段。
+
+    返回结构：{"default": {...}, "small": {...}}
+    """
+    templates: dict[str, dict[str, Any]] = {"default": {}, "small": {}}
+
+    for profile, path in (("default", DEFAULT_SERVER_CONFIG_PATH), ("small", SMALL_SERVER_CONFIG_PATH)):
+        if not path.exists():
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            images = payload.get("images") or {}
+            if isinstance(images, dict):
+                templates[profile] = images
+        except Exception:
+            continue
+    return templates
+
+
+def _save_template_images(profile: str, updates: dict[str, Any]) -> None:
+    """
+    按 profile（default/small）对 server.json / server_small.json 的 images 段做增量更新。
+    """
+    if not updates:
+        return
+    if profile == "small":
+        path = SMALL_SERVER_CONFIG_PATH
+    else:
+        path = DEFAULT_SERVER_CONFIG_PATH
+    if not path.exists():
+        # 不强制创建新文件，避免误操作；后续如有需要可扩展。
+        return
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    images = payload.get("images") or {}
+    if not isinstance(images, dict):
+        images = {}
+    merged = _deep_merge(images, updates)
+    payload["images"] = merged
+    try:
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError:
+        return
+
+
+def _build_cache_config_payload() -> dict[str, Any]:
+    """
+    汇总缓存相关配置：
+    - 当前 hostname 所在的 net_table 目录（例如 configs/net_tabel/DATA/DESKTOP-xxx）。
+    - map.json 中 defaults 与 lines。
+    - server.json / server_small.json 中 images 段，作为模板。
+    - 计算每条产线实际生效的 images（模板 + defaults + line 覆盖）。
+    """
+    root, map_payload = load_map_payload()
+    defaults = map_payload.get("defaults") or {}
+    defaults_images = defaults.get("images") or {}
+    lines = map_payload.get("lines") or []
+
+    templates = _load_template_images()
+
+    line_items: list[dict[str, Any]] = []
+    for line in lines:
+        name = str(line.get("name") or "")
+        key = str(line.get("key") or name)
+        profile = str(line.get("profile") or line.get("api_profile") or "default")
+        mode = str(line.get("mode") or "direct")
+        ip = line.get("ip")
+        port = line.get("port") or line.get("listen_port")
+
+        line_images = line.get("images") or line.get("image") or {}
+        if not isinstance(line_images, dict):
+            line_images = {}
+
+        base_images = templates.get("small" if profile == "small" else "default") or {}
+        effective_images = _deep_merge(base_images, defaults_images)
+        effective_images = _deep_merge(effective_images, line_images)
+
+        line_items.append(
+            {
+                "name": name,
+                "key": key,
+                "profile": profile,
+                "mode": mode,
+                "ip": ip,
+                "port": port,
+                "overrides": {"images": line_images},
+                "effective": {"images": effective_images},
+            }
+        )
+
+    return {
+        "hostname": socket.gethostname(),
+        "map_root": str(root),
+        "map_root_name": root.name,
+        "templates": templates,
+        "defaults": {"images": defaults_images},
+        "lines": line_items,
+    }
+
+
+@router.get("/cache")
+def get_cache_config() -> dict[str, Any]:
+    """
+    读取缓存配置视图：
+    - templates: server.json / server_small.json 中的 images 段。
+    - defaults:  map.json defaults.images。
+    - lines:     各产线的 images 覆盖与实际生效 images。
+    """
+    return _build_cache_config_payload()
+
+
+@router.put("/cache")
+def update_cache_config(payload: CacheConfigUpdatePayload) -> dict[str, Any]:
+    """
+    更新缓存配置：
+    - templates: 写回到 server.json / server_small.json 的 images 段。
+    - defaults:  写回 map.json.defaults（深度合并）。
+    - lines:     按 key 写回 map.json.lines[].images（深度合并）。
+    """
+    # 1. 更新全局模板
+    if payload.templates is not None:
+        if payload.templates.default:
+            _save_template_images("default", payload.templates.default)
+        if payload.templates.small:
+            _save_template_images("small", payload.templates.small)
+
+    # 2. 更新 map.json 默认与产线覆盖
+    root, map_payload = load_map_payload()
+    defaults = map_payload.get("defaults") or {}
+    if payload.defaults:
+        defaults = _deep_merge(defaults, payload.defaults)
+        map_payload["defaults"] = defaults
+
+    if payload.lines:
+        line_updates: dict[str, dict[str, Any]] = {}
+        for item in payload.lines:
+            if item.images:
+                line_updates[item.key] = item.images
+        if line_updates:
+            lines = map_payload.get("lines") or []
+            for line in lines:
+                name = str(line.get("name") or "")
+                key = str(line.get("key") or name)
+                override = line_updates.get(key)
+                if not override:
+                    continue
+                line_images = line.get("images") or line.get("image") or {}
+                if not isinstance(line_images, dict):
+                    line_images = {}
+                merged = _deep_merge(line_images, override)
+                line["images"] = merged
+            map_payload["lines"] = lines
+
+    # 写回 map.json
+    save_map_payload(map_payload)
+
+    # 返回最新视图
+    return _build_cache_config_payload()
 
 
 @router.websocket("/ws/system-metrics")

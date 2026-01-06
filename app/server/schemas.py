@@ -98,6 +98,11 @@ class UiDefectItem(BaseModel):
     confidence: float
     surface: Literal["top", "bottom"]
     image_index: int
+    # 物理坐标系下的边界信息（mm），来自 leftInObj/rightInObj/topInObj/bottomInObj，供前端展示使用。
+    x_mm: Optional[int] = None
+    y_mm: Optional[int] = None
+    width_mm: Optional[int] = None
+    height_mm: Optional[int] = None
 
 
 class UiDefectResponse(BaseModel):
