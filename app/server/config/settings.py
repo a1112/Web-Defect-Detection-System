@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 from pathlib import Path
 from typing import Literal, Optional
 
@@ -12,6 +13,7 @@ SAMPLE_CONFIG_NAME = "server.sample.json"
 ENV_CONFIG_KEY = "SERVER_CONFIG_PATH"
 REPO_ROOT = Path(__file__).resolve().parents[3]
 CONFIG_DIR = REPO_ROOT / "configs"
+NET_TABLE_DATA_DIR = CONFIG_DIR / "net_tabel" / "DATA"
 LEGACY_CONFIG_DIR = Path(__file__).resolve().parent
 
 
@@ -179,6 +181,9 @@ class ServerSettings(BaseModel):
         env_path = os.getenv(ENV_CONFIG_KEY)
         if env_path:
             candidate_paths.append(Path(env_path))
+        data_host_dir = NET_TABLE_DATA_DIR / socket.gethostname()
+        candidate_paths.append(data_host_dir / DEFAULT_CONFIG_NAME)
+        candidate_paths.append(NET_TABLE_DATA_DIR / DEFAULT_CONFIG_NAME)
         candidate_paths.append(CONFIG_DIR / DEFAULT_CONFIG_NAME)
         candidate_paths.append(CONFIG_DIR / SAMPLE_CONFIG_NAME)
         candidate_paths.append(LEGACY_CONFIG_DIR / DEFAULT_CONFIG_NAME)
@@ -200,6 +205,14 @@ def ensure_config_file(explicit_path: str | Path | None = None) -> Path:
         return target
     if explicit_path or env_path:
         raise FileNotFoundError(f"Configuration file not found at {target}")
+    data_host_dir = NET_TABLE_DATA_DIR / socket.gethostname()
+    data_candidates = [
+        data_host_dir / DEFAULT_CONFIG_NAME,
+        NET_TABLE_DATA_DIR / DEFAULT_CONFIG_NAME,
+    ]
+    for candidate in data_candidates:
+        if candidate.exists():
+            return candidate
     sample_candidates = [
         CONFIG_DIR / SAMPLE_CONFIG_NAME,
         LEGACY_CONFIG_DIR / "settings.sample.json",

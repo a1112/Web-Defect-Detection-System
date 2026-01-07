@@ -38,6 +38,15 @@ SMALL_SERVER_CONFIG_PATH = CONFIGS_DIR / "server_small.json"
 MAIN_CONFIG_PATH = CONFIGS_DIR / "main.json"
 
 
+def _resolve_template_path(profile: str) -> Path:
+    name = "server_small.json" if profile == "small" else "server.json"
+    data_root = resolve_net_table_dir()
+    candidate = data_root / name
+    if candidate.exists():
+        return candidate
+    return CONFIGS_DIR / name
+
+
 def _read_linux_cpu_times() -> tuple[int, int]:
     with open("/proc/stat", "r", encoding="utf-8") as handle:
         line = handle.readline()
@@ -481,7 +490,8 @@ def _load_template_images() -> dict[str, dict[str, Any]]:
     """
     templates: dict[str, dict[str, Any]] = {"default": {}, "small": {}}
 
-    for profile, path in (("default", DEFAULT_SERVER_CONFIG_PATH), ("small", SMALL_SERVER_CONFIG_PATH)):
+    for profile in ("default", "small"):
+        path = _resolve_template_path(profile)
         if not path.exists():
             continue
         try:
@@ -500,10 +510,7 @@ def _save_template_images(profile: str, updates: dict[str, Any]) -> None:
     """
     if not updates:
         return
-    if profile == "small":
-        path = SMALL_SERVER_CONFIG_PATH
-    else:
-        path = DEFAULT_SERVER_CONFIG_PATH
+    path = _resolve_template_path(profile)
     if not path.exists():
         # 不强制创建新文件，避免误操作；后续如有需要可扩展。
         return

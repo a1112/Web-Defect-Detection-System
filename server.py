@@ -26,8 +26,12 @@ TEST_MODE_ENV = "DEFECT_TEST_MODE"
 TESTDATA_DIR_ENV = "DEFECT_TESTDATA_DIR"
 
 
-def _resolve_template(profile: str | None) -> Path:
+def _resolve_template(profile: str | None, net_table_root: Path | None = None) -> Path:
     name = "server_small.json" if profile == "small" else "server.json"
+    if net_table_root:
+        candidate = net_table_root / name
+        if candidate.exists():
+            return candidate
     return CONFIG_DIR / name
 
 
@@ -406,7 +410,7 @@ def main() -> None:
         if mode != "direct":
             continue
         profile = line.get("profile") or line.get("api_profile")
-        template = _resolve_template(profile)
+        template = _resolve_template(profile, root)
         if not template.exists():
             raise FileNotFoundError(f"Template config not found: {template}")
         config_path = build_config_for_line(line, template, defaults=defaults)
@@ -439,7 +443,7 @@ def main() -> None:
             )
         )
 
-        small_template = _resolve_template("small")
+        small_template = _resolve_template("small", root)
         if small_template.exists():
             small_config_path = build_config_for_line(line, small_template, defaults=defaults)
             small_port = port + 100
