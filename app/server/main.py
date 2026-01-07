@@ -148,9 +148,14 @@ async def app_lifespan(app: FastAPI):
 
 app = FastAPI(title="Web Defect Detection API", version=API_VERSION, lifespan=app_lifespan)
 
+_cors_env = os.getenv("CORS_ALLOW_ORIGINS", "*")
+_cors_origins = [origin.strip() for origin in _cors_env.split(",") if origin.strip()]
+if _cors_env != "*" and "https://tauri.localhost" not in _cors_origins:
+    _cors_origins.append("https://tauri.localhost")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=os.getenv("CORS_ALLOW_ORIGINS", "*").split(","),
+    allow_origins=_cors_origins if _cors_origins else ["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
