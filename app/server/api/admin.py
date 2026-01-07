@@ -35,6 +35,7 @@ NGINX_CONFIG_PATH = (
 CONFIGS_DIR = REPO_ROOT / "configs"
 DEFAULT_SERVER_CONFIG_PATH = CONFIGS_DIR / "server.json"
 SMALL_SERVER_CONFIG_PATH = CONFIGS_DIR / "server_small.json"
+MAIN_CONFIG_PATH = CONFIGS_DIR / "main.json"
 
 
 def _read_linux_cpu_times() -> tuple[int, int]:
@@ -442,6 +443,19 @@ def get_system_info_alias():
 def get_config_mate():
     root = resolve_net_table_dir()
     map_path = root / "map.json"
+    main_payload: dict[str, Any] = {}
+    if MAIN_CONFIG_PATH.exists() and MAIN_CONFIG_PATH.stat().st_size > 0:
+        try:
+            main_payload = json.loads(MAIN_CONFIG_PATH.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=500, detail=f"Invalid main.json: {exc}") from exc
+    else:
+        main_payload = {
+            "company_name": "数据测试平台",
+            "service_version": "0.0.0",
+            "ui_version": "0.0.0",
+            "service_name": "Defect Detection",
+        }
     if map_path.exists() and map_path.stat().st_size > 0:
         try:
             payload = json.loads(map_path.read_text(encoding="utf-8"))
@@ -450,6 +464,12 @@ def get_config_mate():
     else:
         _, fallback = load_map_payload()
         payload = {"defaults": fallback.get("defaults") or {}, "lines": fallback.get("lines") or []}
+    if not isinstance(payload, dict):
+        payload = {"defaults": {}, "lines": []}
+    payload.setdefault("meta", {})
+    if not isinstance(payload["meta"], dict):
+        payload["meta"] = {}
+    payload["meta"] = {**main_payload, **payload["meta"]}
     return {"path": str(map_path), "payload": payload}
 
 
