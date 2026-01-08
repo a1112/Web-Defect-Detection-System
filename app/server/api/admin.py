@@ -10,8 +10,10 @@ import platform
 import socket
 import sys
 import time
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, status
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from sqlalchemy import text
@@ -36,6 +38,156 @@ CONFIGS_DIR = REPO_ROOT / "configs"
 DEFAULT_SERVER_CONFIG_PATH = CONFIGS_DIR / "server.json"
 SMALL_SERVER_CONFIG_PATH = CONFIGS_DIR / "server_small.json"
 MAIN_CONFIG_PATH = CONFIGS_DIR / "main.json"
+DOWNLOADS_ROOT = REPO_ROOT / "resources" / "downloads"
+
+DOWNLOAD_PLATFORM_SPECS = {
+    "windows": {
+        "label": "Windows",
+        "requirements": ["Windows 10/11", "x64 处理器", "建议 8GB 内存"],
+    },
+    "linux": {
+        "label": "Linux",
+        "requirements": ["Ubuntu 20.04+", "x64 处理器", "建议 8GB 内存"],
+    },
+    "macos": {
+        "label": "macOS",
+        "requirements": ["macOS 12+", "Apple Silicon / Intel"],
+    },
+    "android": {
+        "label": "Android",
+        "requirements": ["Android 10+", "建议 4GB 内存"],
+    },
+    "ios": {
+        "label": "iOS",
+        "requirements": ["iOS 15+", "iPhone/iPad"],
+    },
+}
+
+DOWNLOAD_LABELS = {
+    ".exe": "Windows 安装包 (EXE)",
+    ".msi": "Windows 安装包 (MSI)",
+    ".dmg": "macOS 安装包 (DMG)",
+    ".pkg": "macOS 安装包 (PKG)",
+    ".appimage": "Linux AppImage",
+    ".deb": "Linux DEB",
+    ".rpm": "Linux RPM",
+    ".apk": "Android APK",
+    ".ipa": "iOS IPA",
+}
+
+
+def _format_size(size_bytes: int) -> str:
+    size = float(size_bytes)
+    for unit in ["B", "KB", "MB", "GB", "TB"]:
+        if size < 1024 or unit == "TB":
+            return f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} TB"
+
+
+def _parse_version_key(version: str) -> tuple[int, ...]:
+    parts: list[int] = []
+    for part in version.split("."):
+        if part.isdigit():
+            parts.append(int(part))
+        else:
+            head = "".join(ch for ch in part if ch.isdigit())
+            parts.append(int(head) if head else 0)
+    return tuple(parts or [0])
+
+
+def _list_versions(root: Path) -> list[str]:
+    if not root.exists():
+        return []
+    versions = [p.name for p in root.iterdir() if p.is_dir()]
+    return sorted(versions, key=_parse_version_key, reverse=True)
+
+
+def _build_download_info() -> dict[str, Any]:
+    versions = _list_versions(DOWNLOADS_ROOT)
+    flat_files = []
+    if DOWNLOADS_ROOT.exists():
+        flat_files = [p for p in DOWNLOADS_ROOT.iterdir() if p.is_file()]
+    latest_version = versions[0] if versions else ("latest" if flat_files else "")
+    if flat_files and latest_version not in versions:
+        versions = [latest_version, *versions]
+    platforms = []
+    latest_timestamp: float | None = None
+
+    for key, spec in DOWNLOAD_PLATFORM_SPECS.items():
+        builds: list[dict[str, Any]] = []
+        latest_for_platform = ""
+        for version in versions:
+            version_dir = DOWNLOADS_ROOT / version / key
+            if not version_dir.exists():
+                continue
+            for file_path in sorted(version_dir.iterdir()):
+                if not file_path.is_file():
+                    continue
+                stat = file_path.stat()
+                suffix = file_path.suffix.lower()
+                label = DOWNLOAD_LABELS.get(suffix, file_path.name)
+                builds.append(
+                    {
+                        "version": version,
+                        "label": label,
+                        "file_name": file_path.name,
+                        "size_bytes": stat.st_size,
+                        "size_display": _format_size(stat.st_size),
+                        "download_url": f"/config/download/files/{version}/{key}/{quote(file_path.name)}",
+                        "released_at": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d"),
+                    }
+                )
+                if latest_timestamp is None or stat.st_mtime > latest_timestamp:
+                    latest_timestamp = stat.st_mtime
+            if builds and not latest_for_platform:
+                latest_for_platform = version
+
+        if key == "windows" and flat_files and latest_version:
+            for file_path in sorted(flat_files):
+                stat = file_path.stat()
+                suffix = file_path.suffix.lower()
+                label = DOWNLOAD_LABELS.get(suffix, file_path.name)
+                builds.append(
+                    {
+                        "version": latest_version,
+                        "label": label,
+                        "file_name": file_path.name,
+                        "size_bytes": stat.st_size,
+                        "size_display": _format_size(stat.st_size),
+                        "download_url": f"/config/download/files/{quote(file_path.name)}",
+                        "released_at": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d"),
+                    }
+                )
+                if latest_timestamp is None or stat.st_mtime > latest_timestamp:
+                    latest_timestamp = stat.st_mtime
+            if not latest_for_platform:
+                latest_for_platform = latest_version
+
+        platforms.append(
+            {
+                "key": key,
+                "label": spec["label"],
+                "supported": len(builds) > 0,
+                "requirements": spec["requirements"],
+                "builds": builds,
+                "latest_version": latest_for_platform or latest_version,
+            }
+        )
+
+    updated_at = (
+        datetime.fromtimestamp(latest_timestamp).strftime("%Y-%m-%d %H:%M:%S")
+        if latest_timestamp
+        else ""
+    )
+
+    return {
+        "latest_version": latest_version,
+        "history_versions": versions,
+        "platforms": platforms,
+        "updated_at": updated_at,
+        "notes": [],
+    }
 
 
 def _resolve_template_path(profile: str) -> Path:
@@ -811,3 +963,19 @@ def update_policy(
 def delete_policy(policy_id: int, session: Session = Depends(deps.get_management_db)):
     rbac_manager.delete_policy(session, policy_id)
     return {"status": "ok"}
+
+
+@router.get("/download/info")
+def get_download_info() -> dict[str, Any]:
+    return _build_download_info()
+
+
+@router.get("/download/files/{file_path:path}")
+def download_file(file_path: str):
+    root = DOWNLOADS_ROOT.resolve()
+    candidate = (root / file_path).resolve()
+    if candidate == root or root not in candidate.parents:
+        raise HTTPException(status_code=404, detail="File not found")
+    if not candidate.exists() or not candidate.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(candidate)
