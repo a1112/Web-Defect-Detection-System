@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import json
 from pathlib import Path
 from datetime import datetime
 from typing import Any
@@ -13,7 +14,8 @@ from pydantic import BaseModel
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.server.api import admin
-from app.server.net_table import load_map_payload, save_map_payload
+from app.server.test_model import router as test_model_router
+from app.server.net_table import load_map_payload, save_map_payload, resolve_net_table_dir
 from app.server.utils.speed_test import make_speed_test_response
 
 logger = logging.getLogger(__name__)
@@ -97,7 +99,6 @@ class ProcessManager:
 
 class LineConfigPayload(BaseModel):
     lines: list[dict[str, Any]]
-    defaults: dict[str, Any] | None = None
 
 
 class ApiStatusPayload(BaseModel):
@@ -145,19 +146,59 @@ def create_app(manager: ProcessManager) -> FastAPI:
     @router.get("/lines")
     def get_lines() -> dict[str, Any]:
         root, payload = load_map_payload()
-        return {"root": str(root), "defaults": payload.get("defaults") or {}, "lines": payload.get("lines") or []}
+        return {
+            "root": str(root),
+            "views": payload.get("views") or {},
+            "lines": payload.get("lines") or [],
+        }
 
     @router.put("/lines")
     def save_lines(payload: LineConfigPayload) -> dict[str, Any]:
         current_root, current_payload = load_map_payload()
+        current_views = current_payload.get("views") or {}
+        current_lines = current_payload.get("lines") or []
         merged = {
-            "defaults": payload.defaults if payload.defaults is not None else current_payload.get("defaults") or {},
             "views": current_payload.get("views") or {},
             "lines": payload.lines,
         }
         map_path = save_map_payload(merged)
+        generated_root = resolve_net_table_dir() / "generated"
+        generated_root.mkdir(parents=True, exist_ok=True)
+        old_by_name = {
+            str(item.get("name") or ""): str(item.get("key") or item.get("name") or "")
+            for item in current_lines
+            if isinstance(item, dict)
+        }
+        for line in payload.lines:
+            if not isinstance(line, dict):
+                continue
+            name = str(line.get("name") or "")
+            key = str(line.get("key") or name)
+            if not key:
+                continue
+            prev_key = old_by_name.get(name)
+            if prev_key and prev_key != key:
+                old_path = generated_root / prev_key
+                new_path = generated_root / key
+                if old_path.exists() and not new_path.exists():
+                    old_path.rename(new_path)
+            view_keys = list(current_views.keys()) if isinstance(current_views, dict) and current_views else ["2D"]
+            for view in view_keys:
+                target_dir = generated_root / key / view
+                target_dir.mkdir(parents=True, exist_ok=True)
+                override_path = target_dir / "server.json"
+                if not override_path.exists():
+                    override_path.write_text(
+                        json.dumps(
+                            {"database": {}, "images": {}, "cache": {}},
+                            ensure_ascii=False,
+                            indent=2,
+                        ),
+                        encoding="utf-8",
+                    )
         return {"path": str(map_path), "lines": merged.get("lines") or []}
 
     app.include_router(router)
     app.include_router(admin.router, prefix="/config")
+    app.include_router(test_model_router)
     return app

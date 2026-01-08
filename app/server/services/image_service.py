@@ -3,6 +3,8 @@ from __future__ import annotations
 import math
 import logging
 import threading
+import queue
+import shutil
 from pathlib import Path
 from typing import List, Optional, Tuple
 import json
@@ -32,33 +34,41 @@ class ImageService:
         self.defect_service = defect_service
         self.test_mode = bool(getattr(settings, "test_mode", False))
         image_settings = settings.images
+        cache_settings = settings.cache
         self.mode = image_settings.mode
-        ttl_seconds = image_settings.cache_ttl_seconds
+        ttl_seconds = cache_settings.ttl_seconds
+        def _resolve_limit(value: int) -> int:
+            if value < 0:
+                return 10**9
+            return value
         self.frame_cache = TtlLruCache(
-            max_items=image_settings.max_cached_frames,
+            max_items=_resolve_limit(cache_settings.max_frames),
             ttl_seconds=ttl_seconds,
         )
         tile_ttl_seconds = ttl_seconds
         if image_settings.tile_prefetch_enabled:
             tile_ttl_seconds = max(tile_ttl_seconds, int(image_settings.tile_prefetch_ttl_seconds))
-        self.tile_cache = TtlLruCache(max_items=image_settings.max_cached_tiles, ttl_seconds=tile_ttl_seconds)
+        self.tile_cache = TtlLruCache(
+            max_items=_resolve_limit(cache_settings.max_tiles),
+            ttl_seconds=tile_ttl_seconds,
+        )
         self.mosaic_cache = TtlLruCache(
-            max_items=image_settings.max_cached_mosaics,
+            max_items=_resolve_limit(cache_settings.max_mosaics),
             ttl_seconds=ttl_seconds,
         )
         self.defect_crop_cache = TtlLruCache(
-            max_items=image_settings.max_cached_defect_crops,
+            max_items=_resolve_limit(cache_settings.max_defect_crops),
             ttl_seconds=ttl_seconds,
         )
 
         self.disk_cache = DiskImageCache(
-            enabled=image_settings.disk_cache_enabled,
+            enabled=cache_settings.disk_cache_enabled,
             read_only=self.test_mode,
             flat_layout=False,
-            max_tiles=image_settings.disk_cache_max_tiles,
-            max_defects=image_settings.disk_cache_max_defects,
+            max_tiles=cache_settings.disk_cache_max_records,
+            max_defects=cache_settings.disk_cache_max_records,
             # 缺陷缓存最大裁剪保留来自配置
-            defect_expand=int(getattr(image_settings, "defect_cache_expand", 100) or 100),
+            defect_expand=int(getattr(cache_settings, "defect_cache_expand", 100) or 100),
             tile_size=image_settings.frame_height,
             frame_width=image_settings.frame_width,
             frame_height=image_settings.frame_height,
@@ -80,6 +90,67 @@ class ImageService:
 
         # 缓存错误图像的编码结果，避免重复绘制与编码
         self._error_image_cache: dict[tuple[str, str], bytes] = {}
+        self._cache_status_lock = threading.Lock()
+        self._cache_status: dict[str, object] = {
+            "state": "ready",
+            "message": "就绪",
+            "seq_no": None,
+            "surface": None,
+        }
+        self._cache_task_state: Optional[str] = None
+        self._cache_active_count = 0
+        self._cache_task_queue: queue.Queue[tuple[str, object] | None] = queue.Queue()
+        self._cache_task_thread_started = False
+
+    def get_cache_status(self) -> dict[str, object]:
+        with self._cache_status_lock:
+            return dict(self._cache_status)
+
+    def begin_cache_task(self, state: str, message: str) -> None:
+        with self._cache_status_lock:
+            self._cache_task_state = state
+            self._cache_status = {
+                "state": state,
+                "message": message,
+                "seq_no": None,
+                "surface": None,
+            }
+
+    def end_cache_task(self) -> None:
+        with self._cache_status_lock:
+            self._cache_task_state = None
+            self._cache_status = {
+                "state": "ready",
+                "message": "就绪",
+                "seq_no": None,
+                "surface": None,
+            }
+
+    def _begin_background_cache(self, seq_no: int, surface: str) -> None:
+        with self._cache_status_lock:
+            self._cache_active_count += 1
+            if self._cache_task_state:
+                return
+            surface_label = "上表" if surface == "top" else "下表"
+            self._cache_status = {
+                "state": "caching",
+                "message": f"正在缓存 {seq_no} {surface_label}",
+                "seq_no": seq_no,
+                "surface": surface,
+            }
+
+    def _end_background_cache(self) -> None:
+        with self._cache_status_lock:
+            self._cache_active_count = max(0, self._cache_active_count - 1)
+            if self._cache_task_state:
+                return
+            if self._cache_active_count == 0:
+                self._cache_status = {
+                    "state": "ready",
+                    "message": "就绪",
+                    "seq_no": None,
+                    "surface": None,
+                }
 
     # ------------------------------------------------------------------ #
     # Defect warmup helpers
@@ -92,7 +163,12 @@ class ImageService:
           以便后续前端请求时尽量不再经过 Pillow/OpenCV 的在线裁剪。
         """
         images = self.settings.images
-        if not getattr(images, "disk_cache_enabled", False) or not getattr(images, "defect_cache_enabled", True):
+        cache_settings = self.settings.cache
+        if not getattr(cache_settings, "disk_cache_enabled", False) or not getattr(
+            cache_settings,
+            "defect_cache_enabled",
+            True,
+        ):
             return
         try:
             # surface=None 时同时预热 top/bottom，两侧的缺陷记录都会返回
@@ -124,25 +200,66 @@ class ImageService:
                     item.defect_id,
                 )
 
+    def read_disk_cache_meta(self, seq_no: int) -> dict[str, dict]:
+        """
+        读取指定钢板的磁盘缓存元数据（cache.json）。
+        返回按 surface 分组的元数据字典。
+        """
+        view_dir = self.settings.images.default_view
+        meta_map: dict[str, dict] = {}
+        for surface in ("top", "bottom"):
+            cache_root = self._cache_root(surface)
+            meta = self.disk_cache.read_meta(cache_root, seq_no, view=view_dir)
+            if meta:
+                meta_map[surface] = meta
+        return meta_map
+
+    def precache_seq(self, seq_no: int, *, levels: Optional[int] = None) -> None:
+        """
+        主动触发指定钢板的磁盘缓存预热（瓦片 + 缺陷小图）。
+        """
+        if not self.settings.cache.disk_cache_enabled:
+            return
+        precache_levels = levels if levels is not None else self.settings.cache.disk_precache_levels
+        for surface in ("top", "bottom"):
+            self._precache_seq(surface, seq_no, precache_levels=precache_levels)
+
+    def enqueue_cache_delete(self, seqs: list[int]) -> None:
+        self._cache_task_queue.put(("delete", seqs))
+
+    def enqueue_cache_rebuild(self, seqs: list[int], *, force: bool) -> None:
+        self._cache_task_queue.put(("rebuild", {"seqs": seqs, "force": force}))
+
+    def _remove_cache_seq(self, seq_no: int) -> None:
+        view_dir = self.settings.images.default_view
+        for surface in ("top", "bottom"):
+            cache_root = self._cache_root(surface)
+            cache_dir = self.disk_cache.cache_dir(cache_root, seq_no, view=view_dir)
+            cache_root_dir = cache_dir.parent if cache_dir.name == view_dir else cache_dir
+            if cache_root_dir.exists():
+                shutil.rmtree(cache_root_dir, ignore_errors=True)
+
     def start_background_workers(self) -> None:
         image_settings = self.settings.images
+        cache_settings = self.settings.cache
         self._start_tile_prefetch_threads()
-        if not image_settings.disk_cache_enabled or self.disk_cache.read_only:
+        if not cache_settings.disk_cache_enabled or self.disk_cache.read_only:
             return
         logger.info(
             "disk-cache enabled view=%s tile_size=%s max_level=%s max_tiles=%s max_defects=%s",
             image_settings.default_view,
             image_settings.frame_height,
             self.disk_cache.max_level(),
-            image_settings.disk_cache_max_tiles,
-            image_settings.disk_cache_max_defects,
+            cache_settings.disk_cache_max_records,
+            cache_settings.disk_cache_max_records,
         )
         logger.info(
-            "disk-cache threads precache=%s levels=%s scan_interval=%ss cleanup_interval=%ss",
-            image_settings.disk_cache_precache_enabled,
-            image_settings.disk_cache_precache_levels,
-            image_settings.disk_cache_scan_interval_seconds,
-            image_settings.disk_cache_cleanup_interval_seconds,
+            "disk-cache threads precache=%s levels=%s workers=%s scan_interval=%ss cleanup_interval=%ss",
+            cache_settings.disk_precache_enabled,
+            cache_settings.disk_precache_levels,
+            cache_settings.disk_precache_workers,
+            cache_settings.disk_cache_scan_interval_seconds,
+            cache_settings.disk_cache_cleanup_interval_seconds,
         )
         self._start_disk_cache_threads()
 
@@ -150,7 +267,7 @@ class ImageService:
         if self._tile_prefetch is not None:
             self._tile_prefetch.stop()
             self._tile_prefetch_started = False
-        if not self.settings.images.disk_cache_enabled:
+        if not self.settings.cache.disk_cache_enabled:
             return
         self._disk_cache_stop.set()
         logger.info("disk-cache worker threads stop requested")
@@ -922,17 +1039,66 @@ class ImageService:
             return
         self._disk_cache_thread_started = True
         logger.info("disk-cache worker threads 启动")
-        if self.settings.images.disk_cache_precache_enabled:
+        if not self._cache_task_thread_started:
+            self._cache_task_thread_started = True
+            threading.Thread(target=self._disk_cache_task_loop, daemon=True).start()
+        if self.settings.cache.disk_precache_enabled:
             threading.Thread(target=self._disk_cache_precache_loop, daemon=True).start()
             logger.info("disk-cache precache thread 启动")
         threading.Thread(target=self._disk_cache_cleanup_loop, daemon=True).start()
         logger.info("disk-cache cleanup thread 启动")
 
+    def _disk_cache_task_loop(self) -> None:
+        while not self._disk_cache_stop.is_set():
+            item = self._cache_task_queue.get()
+            if item is None:
+                self._cache_task_queue.task_done()
+                break
+            task, payload = item
+            try:
+                if task == "delete":
+                    seqs = payload if isinstance(payload, list) else []
+                    self.begin_cache_task("deleting", "缓存删除中")
+                    for seq in seqs:
+                        self._remove_cache_seq(int(seq))
+                elif task == "rebuild":
+                    data = payload if isinstance(payload, dict) else {}
+                    seqs = data.get("seqs") or []
+                    force = bool(data.get("force"))
+                    self.begin_cache_task("rebuilding", "缓存重建中")
+                    for seq in seqs:
+                        seq_no = int(seq)
+                        if force:
+                            self._remove_cache_seq(seq_no)
+                        self.precache_seq(seq_no)
+            finally:
+                self.end_cache_task()
+                self._cache_task_queue.task_done()
+
     def _disk_cache_precache_loop(self) -> None:
-        settings = self.settings.images
+        settings = self.settings.cache
         scan_interval = settings.disk_cache_scan_interval_seconds
-        precache_levels = settings.disk_cache_precache_levels
+        precache_levels = settings.disk_precache_levels
+        worker_count = max(1, int(settings.disk_precache_workers))
         last_seq_by_surface: dict[str, int] = {"top": 0, "bottom": 0}
+        task_queue: queue.Queue[tuple[str, int] | None] = queue.Queue()
+
+        def worker_loop() -> None:
+            while not self._disk_cache_stop.is_set():
+                item = task_queue.get()
+                if item is None:
+                    task_queue.task_done()
+                    break
+                surface, seq = item
+                try:
+                    self._precache_seq(surface, seq, precache_levels=precache_levels)
+                except Exception:
+                    logger.exception("disk-cache precache 失败 surface=%s seq=%s", surface, seq)
+                finally:
+                    task_queue.task_done()
+
+        for _ in range(worker_count):
+            threading.Thread(target=worker_loop, daemon=True).start()
 
         while not self._disk_cache_stop.is_set():
             # 先根据 cache.json 与当前配置比对，补充/刷新已有缓存
@@ -948,15 +1114,20 @@ class ImageService:
                 if max_seq is None or max_seq <= current:
                     continue
                 for seq in range(current + 1, max_seq + 1):
-                    try:
-                        self._precache_seq(surface, seq, precache_levels=precache_levels)
-                        last_seq_by_surface[surface] = seq
-                    except Exception:
-                        break
+                    view_dir = self.settings.images.default_view
+                    meta = self.disk_cache.read_meta(self._cache_root(surface), seq, view=view_dir)
+                    if meta:
+                        continue
+                    task_queue.put((surface, seq))
+                last_seq_by_surface[surface] = max_seq
+            task_queue.join()
             self._disk_cache_stop.wait(scan_interval)
+        for _ in range(worker_count):
+            task_queue.put(None)
+        task_queue.join()
 
     def _disk_cache_cleanup_loop(self) -> None:
-        settings = self.settings.images
+        settings = self.settings.cache
         interval = settings.disk_cache_cleanup_interval_seconds
         view_dir = self.settings.images.default_view
 
@@ -970,39 +1141,56 @@ class ImageService:
                         continue
             self._disk_cache_stop.wait(interval)
 
-    def _precache_seq(self, surface: str, seq_no: int, *, precache_levels: int) -> None:
-        view_dir = self.settings.images.default_view
-        max_level = self.disk_cache.max_level()
-        levels = max(1, int(precache_levels))
-        level_start = max(0, max_level - levels + 1)
-
-        tile_size = self.settings.images.frame_height
-
-        for level in range(max_level, level_start - 1, -1):
-            virtual_tile_size = tile_size * (2**level)
-            frames = self._list_frame_paths(surface, seq_no, view_dir)
-            if not frames:
+    def _precache_seq(self, surface: str, seq_no: int, *, precache_levels: int, force: bool = False) -> None:
+        self._begin_background_cache(seq_no, surface)
+        try:
+            view_dir = self.settings.images.default_view
+            meta = self.disk_cache.read_meta(self._cache_root(surface), seq_no, view=view_dir)
+            if meta and not force:
                 return
-            first_img = self._load_frame_from_path(frames[0])
-            mosaic_width = first_img.width
-            mosaic_height = first_img.height * len(frames)
+            max_level = self.disk_cache.max_level()
+            levels = max(1, int(precache_levels))
+            level_start = max(0, max_level - levels + 1)
 
-            tiles_x = max(1, int(math.ceil(mosaic_width / virtual_tile_size)))
-            tiles_y = max(1, int(math.ceil(mosaic_height / virtual_tile_size)))
+            tile_size = self.settings.images.frame_height
 
-            for tile_y in range(tiles_y):
-                for tile_x in range(tiles_x):
-                    self.get_tile(
-                        surface=surface,
-                        seq_no=seq_no,
-                        view=view_dir,
-                        level=level,
-                        tile_x=tile_x,
-                        tile_y=tile_y,
-                        orientation="vertical",
-                        fmt="JPEG",
-                    )
-        logger.info("disk-cache precache %s/%s/%s 完成", surface, seq_no, view_dir)
+            for level in range(max_level, level_start - 1, -1):
+                virtual_tile_size = tile_size * (2**level)
+                try:
+                    frames = self._list_frame_paths(surface, seq_no, view_dir)
+                except FileNotFoundError:
+                    if view_dir != "2D":
+                        try:
+                            frames = self._list_frame_paths(surface, seq_no, "2D")
+                            view_dir = "2D"
+                        except FileNotFoundError:
+                            return
+                    else:
+                        return
+                if not frames:
+                    return
+                first_img = self._load_frame_from_path(frames[0])
+                mosaic_width = first_img.width
+                mosaic_height = first_img.height * len(frames)
+
+                tiles_x = max(1, int(math.ceil(mosaic_width / virtual_tile_size)))
+                tiles_y = max(1, int(math.ceil(mosaic_height / virtual_tile_size)))
+
+                for tile_y in range(tiles_y):
+                    for tile_x in range(tiles_x):
+                        self.get_tile(
+                            surface=surface,
+                            seq_no=seq_no,
+                            view=view_dir,
+                            level=level,
+                            tile_x=tile_x,
+                            tile_y=tile_y,
+                            orientation="vertical",
+                            fmt="JPEG",
+                        )
+            logger.info("disk-cache precache %s/%s/%s 完成", surface, seq_no, view_dir)
+        finally:
+            self._end_background_cache()
 
     def _refresh_disk_cache_meta(self, *, precache_levels: int) -> None:
         """

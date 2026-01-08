@@ -20,7 +20,7 @@ from sqlalchemy import func, text
 import requests
 
 from app.server import deps
-from app.server.api import defects, health, images, steels, meta, net, admin
+from app.server.api import defects, health, images, steels, meta, net, admin, cache
 from app.server.api.dependencies import get_image_service
 from app.server.config.settings import ENV_CONFIG_KEY, ensure_config_file
 from app.server.rbac.manager import bootstrap_management
@@ -184,6 +184,7 @@ app.include_router(meta.router)
 app.include_router(net.router)
 app.include_router(admin.router, prefix="/api")
 app.include_router(admin.router, prefix="/config")
+app.include_router(cache.router)
 
 
 if __name__ == "__main__":

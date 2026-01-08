@@ -380,21 +380,6 @@ def _get_network_interfaces(sample_seconds: float = 0.1) -> list[dict[str, Any]]
         import psutil  # type: ignore
     except Exception:
         return []
-
-
-def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
-    """
-    递归合并字典：用于构建“模板 + defaults + line 覆盖”的最终配置，
-    以及按字段更新 server.json / map.json 中的 images 段。
-    """
-    result = dict(base or {})
-    for key, value in (override or {}).items():
-        if isinstance(value, dict) and isinstance(result.get(key), dict):
-            result[key] = _deep_merge(result[key], value)
-        else:
-            result[key] = value
-    return result
-
     try:
         stats = psutil.net_if_stats()
         io1 = psutil.net_io_counters(pernic=True)
@@ -403,6 +388,20 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
         return _build_network_interfaces(io2, stats, io1, sample_seconds)
     except Exception:
         return []
+
+
+def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    """
+    递归合并字典：用于构建“模板 + line 覆盖”的最终配置，
+    以及按字段更新 server.json。
+    """
+    result = dict(base or {})
+    for key, value in (override or {}).items():
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = _deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
 
 
 def _check_database(session_factory):
@@ -443,28 +442,49 @@ class MockDataPayload(BaseModel):
 
 
 class CacheTemplateUpdate(BaseModel):
-    default: dict[str, Any] | None = None
+    cache: dict[str, Any] | None = None
 
 
 class CacheLineUpdate(BaseModel):
     key: str = Field(..., description="产线 key（map.json lines[].key）")
-    images: dict[str, Any] | None = Field(
+    cache: dict[str, Any] | None = Field(
         default=None,
-        description="写入 map.json 的 images 覆盖配置（部分字段更新）。",
+        description="写入 configs/current/generated/{key}/{view}/server.json 的 cache 覆盖配置。",
     )
 
 
 class CacheConfigUpdatePayload(BaseModel):
     """
     /config/cache 更新载荷：
-    - templates: 修改 configs/current/server.json 中的 images 字段。
-    - defaults:  修改 map.json 中 defaults 段（通常继承到所有产线）。
-    - lines:     按 key 修改对应产线的 images 覆盖字段。
+    - templates: 修改 configs/current/server.json 中的 cache 字段。
+    - lines:     按 key 修改对应产线视图的 cache 覆盖字段。
     """
 
     templates: CacheTemplateUpdate | None = None
-    defaults: dict[str, Any] | None = None
     lines: list[CacheLineUpdate] | None = None
+
+
+class TemplateConfigPayload(BaseModel):
+    server: dict[str, Any] = Field(default_factory=dict)
+    defect_class: dict[str, Any] = Field(default_factory=dict)
+
+
+class TemplateConfigUpdatePayload(BaseModel):
+    server: dict[str, Any] | None = None
+    defect_class: dict[str, Any] | None = None
+
+
+class LineViewOverridePayload(BaseModel):
+    view: str
+    database: dict[str, Any] | None = None
+    images: dict[str, Any] | None = None
+    cache: dict[str, Any] | None = None
+
+
+class LineSettingsPayload(BaseModel):
+    views: list[LineViewOverridePayload] = Field(default_factory=list)
+    defect_class_mode: str = Field(default="template")
+    defect_class: dict[str, Any] | None = None
 
 
 class UserCreatePayload(BaseModel):
@@ -630,9 +650,9 @@ def get_config_mate():
             raise HTTPException(status_code=500, detail=f"Invalid map.json: {exc}") from exc
     else:
         _, fallback = load_map_payload()
-        payload = {"defaults": fallback.get("defaults") or {}, "lines": fallback.get("lines") or []}
+        payload = {"views": fallback.get("views") or {}, "lines": fallback.get("lines") or []}
     if not isinstance(payload, dict):
-        payload = {"defaults": {}, "lines": []}
+        payload = {"views": {}, "lines": []}
     payload.setdefault("meta", {})
     if not isinstance(payload["meta"], dict):
         payload["meta"] = {}
@@ -640,29 +660,27 @@ def get_config_mate():
     return {"path": str(map_path), "payload": payload}
 
 
-def _load_template_images() -> dict[str, dict[str, Any]]:
+def _load_server_template() -> dict[str, Any]:
     """
-    加载 configs/current/server.json 中的 images 段。
-
-    返回结构：{"default": {...}}
+    加载 configs/current/server.json 中的 database/images/cache 段。
     """
-    templates: dict[str, dict[str, Any]] = {"default": {}}
     _ensure_current_dir()
     if not CURRENT_SERVER_CONFIG_PATH.exists():
-        return templates
+        return {"database": {}, "images": {}, "cache": {}}
     try:
         payload = json.loads(CURRENT_SERVER_CONFIG_PATH.read_text(encoding="utf-8"))
-        images = payload.get("images") or {}
-        if isinstance(images, dict):
-            templates["default"] = images
     except Exception:
-        return templates
-    return templates
+        return {"database": {}, "images": {}, "cache": {}}
+    return {
+        "database": payload.get("database") or {},
+        "images": payload.get("images") or {},
+        "cache": payload.get("cache") or {},
+    }
 
 
-def _save_template_images(updates: dict[str, Any]) -> None:
+def _save_server_template(updates: dict[str, Any]) -> None:
     """
-    对 configs/current/server.json 的 images 段做增量更新。
+    对 configs/current/server.json 的 database/images/cache 做增量更新。
     """
     if not updates:
         return
@@ -672,12 +690,13 @@ def _save_template_images(updates: dict[str, Any]) -> None:
     try:
         payload = json.loads(CURRENT_SERVER_CONFIG_PATH.read_text(encoding="utf-8"))
     except Exception:
-        return
-    images = payload.get("images") or {}
-    if not isinstance(images, dict):
-        images = {}
-    merged = _deep_merge(images, updates)
-    payload["images"] = merged
+        payload = {}
+    for key in ("database", "images", "cache"):
+        if key in updates and isinstance(updates.get(key), dict):
+            current = payload.get(key) or {}
+            if not isinstance(current, dict):
+                current = {}
+            payload[key] = _deep_merge(current, updates[key])
     try:
         CURRENT_SERVER_CONFIG_PATH.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2),
@@ -687,22 +706,81 @@ def _save_template_images(updates: dict[str, Any]) -> None:
         return
 
 
+def _load_defect_class_template() -> dict[str, Any]:
+    _ensure_current_dir()
+    path = CURRENT_DIR / "DefectClass.json"
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _save_defect_class_template(payload: dict[str, Any]) -> None:
+    _ensure_current_dir()
+    path = CURRENT_DIR / "DefectClass.json"
+    try:
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError:
+        return
+
+
+def _ensure_line_view_override(line_key: str, view_key: str) -> Path:
+    safe_key = line_key.replace("/", "_").replace("\\", "_")
+    safe_view = view_key.replace("/", "_").replace("\\", "_")
+    target_dir = CURRENT_DIR / "generated" / safe_key / safe_view
+    target_dir.mkdir(parents=True, exist_ok=True)
+    override_path = target_dir / "server.json"
+    if not override_path.exists():
+        override_path.write_text(
+            json.dumps({"database": {}, "images": {}, "cache": {}}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    return override_path
+
+
+def _load_line_view_override(line_key: str, view_key: str) -> dict[str, Any]:
+    override_path = _ensure_line_view_override(line_key, view_key)
+    try:
+        payload = json.loads(override_path.read_text(encoding="utf-8"))
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    return {
+        "database": payload.get("database") or {},
+        "images": payload.get("images") or {},
+        "cache": payload.get("cache") or {},
+    }
+
+
+def _load_line_defect_class(line_key: str) -> tuple[str, dict[str, Any]]:
+    safe_key = line_key.replace("/", "_").replace("\\", "_")
+    custom_path = CURRENT_DIR / "generated" / safe_key / "DefectClass.json"
+    if custom_path.exists():
+        try:
+            payload = json.loads(custom_path.read_text(encoding="utf-8"))
+        except Exception:
+            payload = {}
+        return "custom", payload if isinstance(payload, dict) else {}
+    return "template", _load_defect_class_template()
+
+
 def _build_cache_config_payload() -> dict[str, Any]:
     """
     汇总缓存相关配置：
     - configs/current 目录及 map.json / server.json。
-    - map.json 中 defaults、lines、views。
-    - server.json 中 images 段，作为模板。
-    - 计算每条产线/视图实际生效的 images（模板 + defaults + line 覆盖 + views）。
+    - map.json 中 lines、views。
+    - server.json 中 cache 段，作为模板。
+    - 计算每条产线/视图实际生效的 cache（模板 + line 覆盖）。
     """
     _ensure_current_dir()
     root, map_payload = load_map_payload()
-    defaults = map_payload.get("defaults") or {}
-    defaults_images = defaults.get("images") or {}
     lines = map_payload.get("lines") or []
     views = map_payload.get("views") or {}
 
-    templates = _load_template_images()
+    templates = _load_server_template()
 
     line_items: list[dict[str, Any]] = []
     for line in lines:
@@ -713,24 +791,30 @@ def _build_cache_config_payload() -> dict[str, Any]:
         ip = line.get("ip")
         port = line.get("port") or line.get("listen_port")
 
-        line_images = line.get("images") or line.get("image") or {}
-        if not isinstance(line_images, dict):
-            line_images = {}
-
-        base_images = templates.get("default") or {}
         view_items: list[dict[str, Any]] = []
         if isinstance(views, dict) and views:
             for view_key, view_config in views.items():
-                effective_images = _deep_merge(base_images, defaults_images)
-                effective_images = _deep_merge(effective_images, line_images)
-                if isinstance(view_config, dict):
-                    effective_images = _deep_merge(effective_images, view_config)
-                effective_images["default_view"] = view_key
-                view_items.append({"view": view_key, "images": effective_images})
+                override_path = CURRENT_DIR / "generated" / key / view_key / "server.json"
+                overrides = {}
+                if override_path.exists():
+                    try:
+                        overrides = json.loads(override_path.read_text(encoding="utf-8"))
+                    except Exception:
+                        overrides = {}
+                override_cache = overrides.get("cache") or {}
+                effective_cache = _deep_merge(templates.get("cache") or {}, override_cache)
+                view_items.append({"view": view_key, "cache": effective_cache})
         else:
-            effective_images = _deep_merge(base_images, defaults_images)
-            effective_images = _deep_merge(effective_images, line_images)
-            view_items.append({"view": "2D", "images": effective_images})
+            override_path = CURRENT_DIR / "generated" / key / "2D" / "server.json"
+            overrides = {}
+            if override_path.exists():
+                try:
+                    overrides = json.loads(override_path.read_text(encoding="utf-8"))
+                except Exception:
+                    overrides = {}
+            override_cache = overrides.get("cache") or {}
+            effective_cache = _deep_merge(templates.get("cache") or {}, override_cache)
+            view_items.append({"view": "2D", "cache": effective_cache})
 
         line_items.append(
             {
@@ -740,7 +824,7 @@ def _build_cache_config_payload() -> dict[str, Any]:
                 "mode": mode,
                 "ip": ip,
                 "port": port,
-                "overrides": {"images": line_images},
+                "overrides": {},
                 "views": view_items,
             }
         )
@@ -751,8 +835,7 @@ def _build_cache_config_payload() -> dict[str, Any]:
         "config_root_name": root.name,
         "map_path": str(root / "map.json"),
         "server_path": str(CURRENT_SERVER_CONFIG_PATH),
-        "templates": templates,
-        "defaults": {"images": defaults_images},
+        "templates": {"cache": templates.get("cache") or {}},
         "views": views,
         "lines": line_items,
     }
@@ -762,9 +845,8 @@ def _build_cache_config_payload() -> dict[str, Any]:
 def get_cache_config() -> dict[str, Any]:
     """
     读取缓存配置视图：
-    - templates: configs/current/server.json 中的 images 段。
-    - defaults:  map.json defaults.images。
-    - lines:     各产线的 images 覆盖与视图生效 images。
+    - templates: configs/current/server.json 中的 cache 段。
+    - lines:     各产线视图的 cache 覆盖与视图生效 cache。
     """
     return _build_cache_config_payload()
 
@@ -773,47 +855,145 @@ def get_cache_config() -> dict[str, Any]:
 def update_cache_config(payload: CacheConfigUpdatePayload) -> dict[str, Any]:
     """
     更新缓存配置：
-    - templates: 写回到 configs/current/server.json 的 images 段。
-    - defaults:  写回 map.json.defaults（深度合并）。
-    - lines:     按 key 写回 map.json.lines[].images（深度合并）。
+    - templates: 写回到 configs/current/server.json 的 cache 段。
+    - lines:     按 key 写回 generated/{key}/{view}/server.json 的 cache（深度合并）。
     """
     # 1. 更新全局模板
     if payload.templates is not None:
-        if payload.templates.default:
-            _save_template_images(payload.templates.default)
+        if payload.templates.cache:
+            _save_server_template({"cache": payload.templates.cache})
 
-    # 2. 更新 map.json 默认与产线覆盖
+    # 2. 更新产线覆盖
     root, map_payload = load_map_payload()
-    defaults = map_payload.get("defaults") or {}
-    if payload.defaults:
-        defaults = _deep_merge(defaults, payload.defaults)
-        map_payload["defaults"] = defaults
-
     if payload.lines:
+        views = map_payload.get("views") or {}
+        view_keys = list(views.keys()) if isinstance(views, dict) and views else ["2D"]
         line_updates: dict[str, dict[str, Any]] = {}
         for item in payload.lines:
-            if item.images:
-                line_updates[item.key] = item.images
+            if item.cache:
+                line_updates[item.key] = item.cache
         if line_updates:
-            lines = map_payload.get("lines") or []
-            for line in lines:
+            for line in map_payload.get("lines") or []:
                 name = str(line.get("name") or "")
                 key = str(line.get("key") or name)
                 override = line_updates.get(key)
                 if not override:
                     continue
-                line_images = line.get("images") or line.get("image") or {}
-                if not isinstance(line_images, dict):
-                    line_images = {}
-                merged = _deep_merge(line_images, override)
-                line["images"] = merged
-            map_payload["lines"] = lines
-
-    # 写回 map.json
-    save_map_payload(map_payload)
+                for view_key in view_keys:
+                    override_path = CURRENT_DIR / "generated" / key / view_key / "server.json"
+                    override_path.parent.mkdir(parents=True, exist_ok=True)
+                    existing: dict[str, Any] = {"database": {}, "images": {}, "cache": {}}
+                    if override_path.exists():
+                        try:
+                            existing = json.loads(override_path.read_text(encoding="utf-8"))
+                        except Exception:
+                            existing = {"database": {}, "images": {}, "cache": {}}
+                    current_cache = existing.get("cache") or {}
+                    if not isinstance(current_cache, dict):
+                        current_cache = {}
+                    existing["cache"] = _deep_merge(current_cache, override)
+                    override_path.write_text(
+                        json.dumps(existing, ensure_ascii=False, indent=2),
+                        encoding="utf-8",
+                    )
 
     # 返回最新视图
     return _build_cache_config_payload()
+
+
+@router.get("/config/template")
+def get_template_config() -> TemplateConfigPayload:
+    _ensure_current_dir()
+    server_payload = _load_server_template()
+    defect_class_payload = _load_defect_class_template()
+    return TemplateConfigPayload(server=server_payload, defect_class=defect_class_payload)
+
+
+@router.put("/config/template")
+def update_template_config(payload: TemplateConfigUpdatePayload) -> TemplateConfigPayload:
+    if payload.server is not None:
+        server_update: dict[str, Any] = {}
+        for key in ("database", "images", "cache"):
+            value = payload.server.get(key) if isinstance(payload.server, dict) else None
+            if isinstance(value, dict):
+                server_update[key] = value
+        if server_update:
+            _save_server_template(server_update)
+    if payload.defect_class is not None and isinstance(payload.defect_class, dict):
+        _save_defect_class_template(payload.defect_class)
+    return get_template_config()
+
+
+@router.get("/config/line-settings/{key}")
+def get_line_settings(key: str) -> dict[str, Any]:
+    _ensure_current_dir()
+    root, map_payload = load_map_payload()
+    views = map_payload.get("views") or {}
+    view_keys = list(views.keys()) if isinstance(views, dict) and views else ["2D"]
+    view_items = []
+    for view_key in view_keys:
+        overrides = _load_line_view_override(key, view_key)
+        view_items.append(
+            {
+                "view": view_key,
+                "database": overrides.get("database") or {},
+                "images": overrides.get("images") or {},
+                "cache": overrides.get("cache") or {},
+            }
+        )
+    defect_mode, defect_payload = _load_line_defect_class(key)
+    return {
+        "key": key,
+        "views": view_items,
+        "defect_class_mode": defect_mode,
+        "defect_class": defect_payload,
+        "config_root": str(root),
+    }
+
+
+@router.put("/config/line-settings/{key}")
+def update_line_settings(key: str, payload: LineSettingsPayload) -> dict[str, Any]:
+    _ensure_current_dir()
+    if payload.views:
+        for item in payload.views:
+            view_key = str(item.view or "").strip() or "2D"
+            override_path = _ensure_line_view_override(key, view_key)
+            existing: dict[str, Any] = {"database": {}, "images": {}, "cache": {}}
+            if override_path.exists():
+                try:
+                    existing = json.loads(override_path.read_text(encoding="utf-8"))
+                except Exception:
+                    existing = {"database": {}, "images": {}, "cache": {}}
+            if not isinstance(existing, dict):
+                existing = {"database": {}, "images": {}, "cache": {}}
+            for section in ("database", "images", "cache"):
+                value = getattr(item, section)
+                if isinstance(value, dict):
+                    existing[section] = value
+                elif value is None:
+                    existing.setdefault(section, {})
+            override_path.write_text(
+                json.dumps(existing, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+
+    mode = (payload.defect_class_mode or "template").lower()
+    safe_key = key.replace("/", "_").replace("\\", "_")
+    defect_path = CURRENT_DIR / "generated" / safe_key / "DefectClass.json"
+    if mode == "custom":
+        defect_path.parent.mkdir(parents=True, exist_ok=True)
+        defect_payload = payload.defect_class if isinstance(payload.defect_class, dict) else {}
+        defect_path.write_text(
+            json.dumps(defect_payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    else:
+        if defect_path.exists():
+            try:
+                defect_path.unlink()
+            except OSError:
+                pass
+    return get_line_settings(key)
 
 
 @router.websocket("/ws/system-metrics")

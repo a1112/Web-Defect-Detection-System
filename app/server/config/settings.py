@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field, validator
 
@@ -74,23 +74,6 @@ class ImageSettings(BaseModel):
         gt=0,
         description="Scale factor applied to image-space coordinates (e.g. 0.5 for half-resolution SMALL images).",
     )
-    max_cached_frames: int = Field(default=64, ge=1)
-    max_cached_tiles: int = Field(default=256, ge=1)
-    max_cached_mosaics: int = Field(default=8, ge=1)
-    max_cached_defect_crops: int = Field(default=256, ge=1)
-    cache_ttl_seconds: int = Field(default=120, ge=1)
-    # 缺陷缓存相关：是否启用以及默认裁剪扩展像素（缺陷缓存最大裁剪保留）
-    defect_cache_enabled: bool = Field(
-        default=True,
-        description="是否启用缺陷裁剪结果的磁盘缓存（依赖 disk_cache_enabled 一并生效）。",
-    )
-    defect_cache_expand: int = Field(
-        default=100,
-        ge=0,
-        le=512,
-        description="缺陷缓存最大裁剪保留：缺陷裁剪时的默认扩展像素。",
-    )
-
     tile_prefetch_enabled: bool = Field(default=True)
     tile_prefetch_workers: int = Field(default=2, ge=1)
     tile_prefetch_ttl_seconds: int = Field(default=300, ge=1)
@@ -103,13 +86,6 @@ class ImageSettings(BaseModel):
     tile_prefetch_adjacent_seq_level3_count: int = Field(default=20, ge=0, le=200)
     tile_prefetch_log_enabled: bool = Field(default=True)
     tile_prefetch_log_detail: Literal["summary", "task"] = Field(default="summary")
-    disk_cache_enabled: bool = Field(default=False)
-    disk_cache_max_tiles: int = Field(default=2000, ge=1)
-    disk_cache_max_defects: int = Field(default=1000, ge=1)
-    disk_cache_scan_interval_seconds: int = Field(default=5, ge=1)
-    disk_cache_cleanup_interval_seconds: int = Field(default=60, ge=1)
-    disk_cache_precache_enabled: bool = Field(default=False)
-    disk_cache_precache_levels: int = Field(default=1, ge=1)
     mode: str = Field(default="L", description="Pillow image mode, e.g. L/RGB")
 
     @validator("top_root", "bottom_root", "disk_cache_top_root", "disk_cache_bottom_root", pre=True)
@@ -163,6 +139,7 @@ class ImageSettings(BaseModel):
 class ServerSettings(BaseModel):
     database: DatabaseSettings
     images: ImageSettings
+    cache: "CacheSettings"
     test_mode: bool = Field(default=False, description="Enable local TestData-backed mode (SQLite + local images).")
     testdata_dir: Optional[Path] = Field(default=None, description="Path to TestData directory used in test mode.")
 
@@ -184,6 +161,10 @@ class ServerSettings(BaseModel):
         config_path = cls._resolve_path(explicit_path)
         with open(config_path, "r", encoding="utf-8") as handle:
             payload = json.load(handle)
+        base_path = CURRENT_DIR / DEFAULT_CONFIG_NAME
+        if base_path.exists() and base_path.resolve() != config_path.resolve():
+            base_payload = json.loads(base_path.read_text(encoding="utf-8"))
+            payload = _deep_merge(base_payload, payload)
         return cls(**payload)
 
     @staticmethod
@@ -237,3 +218,38 @@ def ensure_config_file(explicit_path: str | Path | None = None) -> Path:
         "No configuration file found. "
         "Provide SERVER_CONFIG_PATH or create configs/server.json."
     )
+
+
+class CacheSettings(BaseModel):
+    max_frames: int = Field(default=64, ge=-1)
+    max_tiles: int = Field(default=256, ge=-1)
+    max_mosaics: int = Field(default=8, ge=-1)
+    max_defect_crops: int = Field(default=256, ge=-1)
+    ttl_seconds: int = Field(default=120, ge=1)
+    defect_cache_enabled: bool = Field(
+        default=True,
+        description="是否启用缺陷裁剪结果的磁盘缓存（依赖 disk_cache_enabled 一并生效）。",
+    )
+    defect_cache_expand: int = Field(
+        default=100,
+        ge=0,
+        le=512,
+        description="缺陷缓存最大裁剪保留：缺陷裁剪时的默认扩展像素。",
+    )
+    disk_cache_enabled: bool = Field(default=False)
+    disk_cache_max_records: int = Field(default=20000, ge=1)
+    disk_cache_scan_interval_seconds: int = Field(default=5, ge=1)
+    disk_cache_cleanup_interval_seconds: int = Field(default=60, ge=1)
+    disk_precache_enabled: bool = Field(default=False)
+    disk_precache_levels: int = Field(default=1, ge=1)
+    disk_precache_workers: int = Field(default=2, ge=1)
+
+
+def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    result = dict(base or {})
+    for key, value in (override or {}).items():
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = _deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result

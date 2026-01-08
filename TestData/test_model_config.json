@@ -1,0 +1,37 @@
+{
+  "enabled": true,
+  "record_interval_seconds": 12,
+  "auto_add_images": true,
+  "auto_add_defects": true,
+  "defect_per_record": 200,
+  "defect_interval_seconds": 3,
+  "defects_per_interval": 5,
+  "length_range": [
+    1000,
+    6000
+  ],
+  "width_range": [
+    800,
+    2000
+  ],
+  "thickness_range": [
+    5,
+    50
+  ],
+  "frame_width": 16384,
+  "frame_height": 1024,
+  "source_seq": 1,
+  "last_seq": 52,
+  "line_key": null,
+  "remaining_records": 9,
+  "total_records": 10,
+  "image_count_min": 10,
+  "image_count_max": 200,
+  "image_interval_ms": 2000,
+  "views": [
+    "2D",
+    "small"
+  ],
+  "generate_small_view": true,
+  "interval_seconds": 5
+}

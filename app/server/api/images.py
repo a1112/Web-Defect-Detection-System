@@ -199,7 +199,7 @@ def api_tile_image(
             "X-Tile-Size": str(service.settings.images.frame_height),
             "X-Tile-Orientation": orientation,
         }
-        cache_ttl = int(getattr(service.settings.images, "cache_ttl_seconds", 120) or 120)
+        cache_ttl = int(getattr(service.settings.cache, "ttl_seconds", 120) or 120)
         headers["Cache-Control"] = f"public, max-age={cache_ttl}"
         return Response(content=payload, media_type=_image_media_type(fmt), headers=headers)
     except FileNotFoundError as exc:

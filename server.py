@@ -424,7 +424,6 @@ def main() -> None:
         _ensure_testdata_dir(testdata_dir)
 
     config = load_map_config()
-    defaults = config.get("defaults") or {}
     lines: list[dict[str, Any]] = config.get("lines") or []
     views: dict[str, Any] = config.get("views") or {}
     if not lines:
@@ -444,8 +443,8 @@ def main() -> None:
         line_name = str(line.get("name") or "")
         line_key = str(line.get("key") or line_name)
         defect_class_path = None
-        if line_name:
-            candidate = CURRENT_DIR / line_name / "DefectClass.json"
+        if line_key:
+            candidate = CURRENT_DIR / "generated" / line_key / "DefectClass.json"
             if candidate.exists():
                 defect_class_path = candidate
         if defect_class_path is None:
@@ -458,12 +457,13 @@ def main() -> None:
             offset = _view_port_offset(view_key, view_config if isinstance(view_config, dict) else None, view_index)
             view_port = port + offset
             view_payload = view_config if isinstance(view_config, dict) else {}
+            override_path = CURRENT_DIR / "generated" / line_key / view_key / "server.json"
             config_path = build_config_for_line(
                 line,
                 template,
-                defaults=defaults,
                 view_name=view_key,
                 view_overrides=view_payload,
+                override_path=override_path,
             )
             logger.info(
                 "Starting line '%s' view '%s' on %s:%s with %s",

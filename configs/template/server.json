@@ -18,20 +18,22 @@
     "file_extension": "jpg",
     "frame_width": 16384,
     "frame_height": 1024,
-    "mode": "L",
-    "max_cached_frames": 64,
-    "max_cached_tiles": 256,
-    "max_cached_mosaics": 8,
-    "max_cached_defect_crops": 256,
-    "cache_ttl_seconds": 120,
+    "mode": "L"
+  },
+  "cache": {
+    "max_frames": 64,
+    "max_tiles": 256,
+    "max_mosaics": 8,
+    "max_defect_crops": 256,
+    "ttl_seconds": 120,
     "defect_cache_enabled": true,
     "defect_cache_expand": 100,
     "disk_cache_enabled": true,
-    "disk_cache_max_tiles": 2000,
-    "disk_cache_max_defects": 1000,
+    "disk_cache_max_records": 20000,
     "disk_cache_scan_interval_seconds": 5,
     "disk_cache_cleanup_interval_seconds": 60,
-    "disk_cache_precache_enabled": true,
-    "disk_cache_precache_levels": 4
+    "disk_precache_enabled": true,
+    "disk_precache_levels": 4,
+    "disk_precache_workers": 2
   }
 }

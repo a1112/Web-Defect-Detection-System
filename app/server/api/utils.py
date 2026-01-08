@@ -26,9 +26,9 @@ def _resolve_defect_class_file() -> Path:
         candidate = Path(env_path)
         if candidate.exists():
             return candidate
-    line_name = os.getenv("DEFECT_LINE_NAME")
-    if line_name:
-        line_path = CURRENT_DIR / line_name / "DefectClass.json"
+    line_key = os.getenv("DEFECT_LINE_KEY") or os.getenv("DEFECT_LINE_NAME")
+    if line_key:
+        line_path = CURRENT_DIR / "generated" / line_key / "DefectClass.json"
         if line_path.exists():
             return line_path
     return DEFAULT_DEFECT_CLASS

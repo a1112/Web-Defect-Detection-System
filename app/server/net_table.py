@@ -33,50 +33,45 @@ def resolve_net_table_dir(hostname: str | None = None) -> Path:
 def load_map_config(hostname: str | None = None) -> dict[str, Any]:
     root = resolve_net_table_dir(hostname)
     map_path = root / "map.json"
-    defaults: dict[str, Any] = {}
     views: dict[str, Any] = {}
     if map_path.exists() and map_path.stat().st_size > 0:
         payload = json.loads(map_path.read_text(encoding="utf-8"))
         if isinstance(payload, list):
             lines = payload
         elif isinstance(payload, dict):
-            defaults = payload.get("defaults") or {}
             views = payload.get("views") or {}
             lines = payload.get("lines") or payload.get("items") or payload.get("data") or []
         else:
             lines = []
     else:
         lines = []
-    return {"root": root, "lines": lines, "defaults": defaults, "views": views}
+    return {"root": root, "lines": lines, "views": views}
 
 
 def load_map_payload(hostname: str | None = None) -> tuple[Path, dict[str, Any]]:
     root = resolve_net_table_dir(hostname)
     map_path = root / "map.json"
-    defaults: dict[str, Any] = {}
     views: dict[str, Any] = {}
     if map_path.exists() and map_path.stat().st_size > 0:
         payload = json.loads(map_path.read_text(encoding="utf-8"))
         if isinstance(payload, list):
-            return root, {"defaults": {}, "views": {}, "lines": payload}
+            return root, {"views": {}, "lines": payload}
         if isinstance(payload, dict):
-            defaults = payload.get("defaults") or {}
             views = payload.get("views") or {}
             lines = payload.get("lines") or payload.get("items") or payload.get("data") or []
-            return root, {"defaults": defaults, "views": views, "lines": lines}
-    return root, {"defaults": defaults, "views": views, "lines": []}
+            return root, {"views": views, "lines": lines}
+    return root, {"views": views, "lines": []}
 
 
 def save_map_payload(payload: dict[str, Any], hostname: str | None = None) -> Path:
     root = resolve_net_table_dir(hostname)
     map_path = root / "map.json"
     payload = payload or {}
-    defaults = payload.get("defaults") or {}
     views = payload.get("views") or {}
     lines = payload.get("lines") or []
     if not isinstance(lines, list):
         raise ValueError("lines must be a list")
-    stored = {"defaults": defaults, "views": views, "lines": lines}
+    stored: dict[str, Any] = {"views": views, "lines": lines}
     map_path.write_text(json.dumps(stored, ensure_ascii=False, indent=2), encoding="utf-8")
     return map_path
 
@@ -103,27 +98,45 @@ def _apply_ip_format(value: Any, ip: str | None) -> Any:
 def build_config_for_line(
     line: dict[str, Any],
     template_path: Path,
-    defaults: dict[str, Any] | None = None,
     view_name: str | None = None,
     view_overrides: dict[str, Any] | None = None,
+    override_path: Path | None = None,
 ) -> Path:
     payload = json.loads(template_path.read_text(encoding="utf-8"))
-    defaults = defaults or {}
-    payload = _merge_dict(payload, defaults)
 
     database = payload.get("database", {}) if isinstance(payload.get("database"), dict) else {}
     images = payload.get("images", {}) if isinstance(payload.get("images"), dict) else {}
+    cache = payload.get("cache", {}) if isinstance(payload.get("cache"), dict) else {}
 
     line_db = line.get("db") or line.get("database") or {}
     line_images = line.get("images") or line.get("image") or {}
+    line_cache = line.get("cache") or {}
     if isinstance(line_db, dict):
         database = _merge_dict(database, line_db)
     if isinstance(line_images, dict):
         images = _merge_dict(images, line_images)
+    if isinstance(line_cache, dict):
+        cache = _merge_dict(cache, line_cache)
     if isinstance(view_overrides, dict):
         images = _merge_dict(images, view_overrides)
     if view_name:
         images["default_view"] = view_name
+
+    if override_path and override_path.exists():
+        try:
+            overrides = json.loads(override_path.read_text(encoding="utf-8"))
+        except Exception:
+            overrides = {}
+        if isinstance(overrides, dict):
+            override_db = overrides.get("database") or {}
+            override_images = overrides.get("images") or {}
+            override_cache = overrides.get("cache") or {}
+            if isinstance(override_db, dict):
+                database = _merge_dict(database, override_db)
+            if isinstance(override_images, dict):
+                images = _merge_dict(images, override_images)
+            if isinstance(override_cache, dict):
+                cache = _merge_dict(cache, override_cache)
 
     ip = line.get("ip") or database.get("host")
     if ip and not database.get("host"):
@@ -134,9 +147,10 @@ def build_config_for_line(
 
     payload["database"] = database
     payload["images"] = images
+    payload["cache"] = cache
 
-    line_name = str(line.get("name") or "line")
-    safe_name = line_name.replace("/", "_").replace("\\", "_")
+    line_key = str(line.get("key") or line.get("name") or "line")
+    safe_name = line_key.replace("/", "_").replace("\\", "_")
     view_suffix = view_name.replace("/", "_").replace("\\", "_") if view_name else "default"
     target_dir = GENERATED_ROOT / safe_name / view_suffix
     target_dir.mkdir(parents=True, exist_ok=True)

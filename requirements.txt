@@ -10,3 +10,4 @@ uvicorn
 casbin
 casbin_sqlalchemy_adapter
 psutil
+colorlog
