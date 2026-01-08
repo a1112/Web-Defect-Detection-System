@@ -1,102 +1,70 @@
 from __future__ import annotations
 
 import json
-import socket
 import shutil
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 from urllib.parse import quote
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-NET_TABLE_ROOT = REPO_ROOT / "configs" / "net_tabel"
-DATA_ROOT = NET_TABLE_ROOT / "DATA"
-DEFAULT_ROOT = NET_TABLE_ROOT / "DEFAULT"
-GENERATED_ROOT = NET_TABLE_ROOT / "generated"
+CONFIG_DIR = REPO_ROOT / "configs"
+CURRENT_ROOT = CONFIG_DIR / "current"
+TEMPLATE_ROOT = CONFIG_DIR / "template"
+GENERATED_ROOT = CURRENT_ROOT / "generated"
+
+
+def _ensure_current_root() -> Path:
+    CURRENT_ROOT.mkdir(parents=True, exist_ok=True)
+    TEMPLATE_ROOT.mkdir(parents=True, exist_ok=True)
+    for name in ("server.json", "map.json", "DefectClass.json"):
+        target = CURRENT_ROOT / name
+        if target.exists():
+            continue
+        source = TEMPLATE_ROOT / name
+        if source.exists():
+            shutil.copy2(source, target)
+    return CURRENT_ROOT
 
 
 def resolve_net_table_dir(hostname: str | None = None) -> Path:
-    name = hostname or socket.gethostname()
-    candidate = DATA_ROOT / name
-    if candidate.exists():
-        return candidate
-    candidate.mkdir(parents=True, exist_ok=True)
-    if DEFAULT_ROOT.exists():
-        shutil.copytree(DEFAULT_ROOT, candidate, dirs_exist_ok=True)
-    return candidate
-
-
-def _iter_line_dirs(root: Path) -> Iterable[Path]:
-    if not root.exists():
-        return []
-    return [item for item in root.iterdir() if item.is_dir()]
-
-
-def _generate_lines_from_dirs(root: Path) -> list[dict[str, Any]]:
-    base_port = 8200
-    lines: list[dict[str, Any]] = []
-    for idx, folder in enumerate(sorted(_iter_line_dirs(root), key=lambda item: item.name)):
-        lines.append(
-            {
-                "name": folder.name,
-                "mode": "direct",
-                "ip": None,
-                "port": base_port + idx,
-            }
-        )
-    return lines
+    return _ensure_current_root()
 
 
 def load_map_config(hostname: str | None = None) -> dict[str, Any]:
     root = resolve_net_table_dir(hostname)
     map_path = root / "map.json"
     defaults: dict[str, Any] = {}
+    views: dict[str, Any] = {}
     if map_path.exists() and map_path.stat().st_size > 0:
         payload = json.loads(map_path.read_text(encoding="utf-8"))
         if isinstance(payload, list):
             lines = payload
         elif isinstance(payload, dict):
             defaults = payload.get("defaults") or {}
+            views = payload.get("views") or {}
             lines = payload.get("lines") or payload.get("items") or payload.get("data") or []
         else:
             lines = []
     else:
-        lines = _generate_lines_from_dirs(root)
-    if not lines and root != DEFAULT_ROOT:
-        fallback_path = DEFAULT_ROOT / "map.json"
-        if fallback_path.exists() and fallback_path.stat().st_size > 0:
-            payload = json.loads(fallback_path.read_text(encoding="utf-8"))
-            if isinstance(payload, list):
-                lines = payload
-            elif isinstance(payload, dict):
-                defaults = payload.get("defaults") or {}
-                lines = payload.get("lines") or payload.get("items") or payload.get("data") or []
-            root = DEFAULT_ROOT
-        else:
-            lines = _generate_lines_from_dirs(DEFAULT_ROOT)
-            root = DEFAULT_ROOT
-    if not lines and root == DEFAULT_ROOT:
-        data_dirs = [item for item in _iter_line_dirs(DATA_ROOT) if item.is_dir()]
-        if data_dirs:
-            fallback_root = sorted(data_dirs, key=lambda item: item.name)[0]
-            lines = _generate_lines_from_dirs(fallback_root)
-            root = fallback_root
-    return {"root": root, "lines": lines, "defaults": defaults}
+        lines = []
+    return {"root": root, "lines": lines, "defaults": defaults, "views": views}
 
 
 def load_map_payload(hostname: str | None = None) -> tuple[Path, dict[str, Any]]:
     root = resolve_net_table_dir(hostname)
     map_path = root / "map.json"
     defaults: dict[str, Any] = {}
+    views: dict[str, Any] = {}
     if map_path.exists() and map_path.stat().st_size > 0:
         payload = json.loads(map_path.read_text(encoding="utf-8"))
         if isinstance(payload, list):
-            return root, {"defaults": {}, "lines": payload}
+            return root, {"defaults": {}, "views": {}, "lines": payload}
         if isinstance(payload, dict):
             defaults = payload.get("defaults") or {}
+            views = payload.get("views") or {}
             lines = payload.get("lines") or payload.get("items") or payload.get("data") or []
-            return root, {"defaults": defaults, "lines": lines}
-    lines = _generate_lines_from_dirs(root)
-    return root, {"defaults": defaults, "lines": lines}
+            return root, {"defaults": defaults, "views": views, "lines": lines}
+    return root, {"defaults": defaults, "views": views, "lines": []}
 
 
 def save_map_payload(payload: dict[str, Any], hostname: str | None = None) -> Path:
@@ -104,10 +72,11 @@ def save_map_payload(payload: dict[str, Any], hostname: str | None = None) -> Pa
     map_path = root / "map.json"
     payload = payload or {}
     defaults = payload.get("defaults") or {}
+    views = payload.get("views") or {}
     lines = payload.get("lines") or []
     if not isinstance(lines, list):
         raise ValueError("lines must be a list")
-    stored = {"defaults": defaults, "lines": lines}
+    stored = {"defaults": defaults, "views": views, "lines": lines}
     map_path.write_text(json.dumps(stored, ensure_ascii=False, indent=2), encoding="utf-8")
     return map_path
 
@@ -135,6 +104,8 @@ def build_config_for_line(
     line: dict[str, Any],
     template_path: Path,
     defaults: dict[str, Any] | None = None,
+    view_name: str | None = None,
+    view_overrides: dict[str, Any] | None = None,
 ) -> Path:
     payload = json.loads(template_path.read_text(encoding="utf-8"))
     defaults = defaults or {}
@@ -149,6 +120,10 @@ def build_config_for_line(
         database = _merge_dict(database, line_db)
     if isinstance(line_images, dict):
         images = _merge_dict(images, line_images)
+    if isinstance(view_overrides, dict):
+        images = _merge_dict(images, view_overrides)
+    if view_name:
+        images["default_view"] = view_name
 
     ip = line.get("ip") or database.get("host")
     if ip and not database.get("host"):
@@ -162,7 +137,8 @@ def build_config_for_line(
 
     line_name = str(line.get("name") or "line")
     safe_name = line_name.replace("/", "_").replace("\\", "_")
-    target_dir = GENERATED_ROOT / safe_name
+    view_suffix = view_name.replace("/", "_").replace("\\", "_") if view_name else "default"
+    target_dir = GENERATED_ROOT / safe_name / view_suffix
     target_dir.mkdir(parents=True, exist_ok=True)
     target_path = target_dir / template_path.name
     target_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -172,6 +148,7 @@ def build_config_for_line(
 def get_api_list(hostname: str | None = None) -> list[dict[str, Any]]:
     config = load_map_config(hostname)
     lines = config.get("lines") or []
+    views = config.get("views") or {}
     items: list[dict[str, Any]] = []
     for line in lines:
         name = str(line.get("name") or "")
@@ -180,16 +157,27 @@ def get_api_list(hostname: str | None = None) -> list[dict[str, Any]]:
             continue
         encoded = quote(key, safe="")
         profile = line.get("profile") or line.get("api_profile") or "default"
-        path_suffix = "small--api" if profile == "small" else "api"
+        view_keys = list(views.keys()) if isinstance(views, dict) and views else ["2D"]
+        view_payloads = []
+        for view_key in view_keys:
+            suffix = "api" if view_key in ("2D", "default") else f"{view_key}--api"
+            view_payloads.append(
+                {
+                    "view": view_key,
+                    "path": f"/{suffix}/{encoded}",
+                    "profile": profile,
+                }
+            )
         items.append(
             {
                 "key": key,
                 "name": name,
                 "mode": line.get("mode") or "direct",
-                "path": f"/{encoded}/{path_suffix}",
+                "path": f"/api/{encoded}",
                 "profile": profile,
                 "port": line.get("port") or line.get("listen_port"),
                 "ip": line.get("ip"),
+                "views": view_payloads,
             }
         )
     return items

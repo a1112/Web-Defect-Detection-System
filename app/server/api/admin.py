@@ -35,9 +35,10 @@ NGINX_CONFIG_PATH = (
     / "nginx.conf"
 )
 CONFIGS_DIR = REPO_ROOT / "configs"
-DEFAULT_SERVER_CONFIG_PATH = CONFIGS_DIR / "server.json"
-SMALL_SERVER_CONFIG_PATH = CONFIGS_DIR / "server_small.json"
-MAIN_CONFIG_PATH = CONFIGS_DIR / "main.json"
+TEMPLATE_DIR = CONFIGS_DIR / "template"
+CURRENT_DIR = CONFIGS_DIR / "current"
+CURRENT_SERVER_CONFIG_PATH = CURRENT_DIR / "server.json"
+VERSION_CONFIG_PATH = CONFIGS_DIR / "version.json"
 DOWNLOADS_ROOT = REPO_ROOT / "resources" / "downloads"
 
 DOWNLOAD_PLATFORM_SPECS = {
@@ -190,13 +191,17 @@ def _build_download_info() -> dict[str, Any]:
     }
 
 
-def _resolve_template_path(profile: str) -> Path:
-    name = "server_small.json" if profile == "small" else "server.json"
-    data_root = resolve_net_table_dir()
-    candidate = data_root / name
-    if candidate.exists():
-        return candidate
-    return CONFIGS_DIR / name
+def _ensure_current_dir() -> Path:
+    CURRENT_DIR.mkdir(parents=True, exist_ok=True)
+    TEMPLATE_DIR.mkdir(parents=True, exist_ok=True)
+    for name in ("server.json", "map.json", "DefectClass.json"):
+        target = CURRENT_DIR / name
+        if target.exists():
+            continue
+        source = TEMPLATE_DIR / name
+        if source.exists():
+            target.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+    return CURRENT_DIR
 
 
 def _read_linux_cpu_times() -> tuple[int, int]:
@@ -439,7 +444,6 @@ class MockDataPayload(BaseModel):
 
 class CacheTemplateUpdate(BaseModel):
     default: dict[str, Any] | None = None
-    small: dict[str, Any] | None = None
 
 
 class CacheLineUpdate(BaseModel):
@@ -453,7 +457,7 @@ class CacheLineUpdate(BaseModel):
 class CacheConfigUpdatePayload(BaseModel):
     """
     /config/cache 更新载荷：
-    - templates: 修改全局模板（configs/server.json / server_small.json 中的 images 字段，按 profile 区分）。
+    - templates: 修改 configs/current/server.json 中的 images 字段。
     - defaults:  修改 map.json 中 defaults 段（通常继承到所有产线）。
     - lines:     按 key 修改对应产线的 images 覆盖字段。
     """
@@ -602,20 +606,22 @@ def get_system_info_alias():
 
 @router.get("/mate")
 def get_config_mate():
+    _ensure_current_dir()
     root = resolve_net_table_dir()
     map_path = root / "map.json"
     main_payload: dict[str, Any] = {}
-    if MAIN_CONFIG_PATH.exists() and MAIN_CONFIG_PATH.stat().st_size > 0:
+    if VERSION_CONFIG_PATH.exists() and VERSION_CONFIG_PATH.stat().st_size > 0:
         try:
-            main_payload = json.loads(MAIN_CONFIG_PATH.read_text(encoding="utf-8"))
+            version_payload = json.loads(VERSION_CONFIG_PATH.read_text(encoding="utf-8"))
+            if isinstance(version_payload, dict):
+                main_payload = {
+                    "service_version": version_payload.get("version") or "0.0.0",
+                }
         except json.JSONDecodeError as exc:
-            raise HTTPException(status_code=500, detail=f"Invalid main.json: {exc}") from exc
+            raise HTTPException(status_code=500, detail=f"Invalid version.json: {exc}") from exc
     else:
         main_payload = {
-            "company_name": "数据测试平台",
             "service_version": "0.0.0",
-            "ui_version": "0.0.0",
-            "service_name": "Defect Detection",
         }
     if map_path.exists() and map_path.stat().st_size > 0:
         try:
@@ -636,38 +642,35 @@ def get_config_mate():
 
 def _load_template_images() -> dict[str, dict[str, Any]]:
     """
-    加载全局模板 server.json / server_small.json 中的 images 段。
+    加载 configs/current/server.json 中的 images 段。
 
-    返回结构：{"default": {...}, "small": {...}}
+    返回结构：{"default": {...}}
     """
-    templates: dict[str, dict[str, Any]] = {"default": {}, "small": {}}
-
-    for profile in ("default", "small"):
-        path = _resolve_template_path(profile)
-        if not path.exists():
-            continue
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-            images = payload.get("images") or {}
-            if isinstance(images, dict):
-                templates[profile] = images
-        except Exception:
-            continue
+    templates: dict[str, dict[str, Any]] = {"default": {}}
+    _ensure_current_dir()
+    if not CURRENT_SERVER_CONFIG_PATH.exists():
+        return templates
+    try:
+        payload = json.loads(CURRENT_SERVER_CONFIG_PATH.read_text(encoding="utf-8"))
+        images = payload.get("images") or {}
+        if isinstance(images, dict):
+            templates["default"] = images
+    except Exception:
+        return templates
     return templates
 
 
-def _save_template_images(profile: str, updates: dict[str, Any]) -> None:
+def _save_template_images(updates: dict[str, Any]) -> None:
     """
-    按 profile（default/small）对 server.json / server_small.json 的 images 段做增量更新。
+    对 configs/current/server.json 的 images 段做增量更新。
     """
     if not updates:
         return
-    path = _resolve_template_path(profile)
-    if not path.exists():
-        # 不强制创建新文件，避免误操作；后续如有需要可扩展。
+    _ensure_current_dir()
+    if not CURRENT_SERVER_CONFIG_PATH.exists():
         return
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = json.loads(CURRENT_SERVER_CONFIG_PATH.read_text(encoding="utf-8"))
     except Exception:
         return
     images = payload.get("images") or {}
@@ -676,7 +679,10 @@ def _save_template_images(profile: str, updates: dict[str, Any]) -> None:
     merged = _deep_merge(images, updates)
     payload["images"] = merged
     try:
-        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        CURRENT_SERVER_CONFIG_PATH.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
     except OSError:
         return
 
@@ -684,15 +690,17 @@ def _save_template_images(profile: str, updates: dict[str, Any]) -> None:
 def _build_cache_config_payload() -> dict[str, Any]:
     """
     汇总缓存相关配置：
-    - 当前 hostname 所在的 net_table 目录（例如 configs/net_tabel/DATA/DESKTOP-xxx）。
-    - map.json 中 defaults 与 lines。
-    - server.json / server_small.json 中 images 段，作为模板。
-    - 计算每条产线实际生效的 images（模板 + defaults + line 覆盖）。
+    - configs/current 目录及 map.json / server.json。
+    - map.json 中 defaults、lines、views。
+    - server.json 中 images 段，作为模板。
+    - 计算每条产线/视图实际生效的 images（模板 + defaults + line 覆盖 + views）。
     """
+    _ensure_current_dir()
     root, map_payload = load_map_payload()
     defaults = map_payload.get("defaults") or {}
     defaults_images = defaults.get("images") or {}
     lines = map_payload.get("lines") or []
+    views = map_payload.get("views") or {}
 
     templates = _load_template_images()
 
@@ -709,9 +717,20 @@ def _build_cache_config_payload() -> dict[str, Any]:
         if not isinstance(line_images, dict):
             line_images = {}
 
-        base_images = templates.get("small" if profile == "small" else "default") or {}
-        effective_images = _deep_merge(base_images, defaults_images)
-        effective_images = _deep_merge(effective_images, line_images)
+        base_images = templates.get("default") or {}
+        view_items: list[dict[str, Any]] = []
+        if isinstance(views, dict) and views:
+            for view_key, view_config in views.items():
+                effective_images = _deep_merge(base_images, defaults_images)
+                effective_images = _deep_merge(effective_images, line_images)
+                if isinstance(view_config, dict):
+                    effective_images = _deep_merge(effective_images, view_config)
+                effective_images["default_view"] = view_key
+                view_items.append({"view": view_key, "images": effective_images})
+        else:
+            effective_images = _deep_merge(base_images, defaults_images)
+            effective_images = _deep_merge(effective_images, line_images)
+            view_items.append({"view": "2D", "images": effective_images})
 
         line_items.append(
             {
@@ -722,16 +741,19 @@ def _build_cache_config_payload() -> dict[str, Any]:
                 "ip": ip,
                 "port": port,
                 "overrides": {"images": line_images},
-                "effective": {"images": effective_images},
+                "views": view_items,
             }
         )
 
     return {
         "hostname": socket.gethostname(),
-        "map_root": str(root),
-        "map_root_name": root.name,
+        "config_root": str(root),
+        "config_root_name": root.name,
+        "map_path": str(root / "map.json"),
+        "server_path": str(CURRENT_SERVER_CONFIG_PATH),
         "templates": templates,
         "defaults": {"images": defaults_images},
+        "views": views,
         "lines": line_items,
     }
 
@@ -740,9 +762,9 @@ def _build_cache_config_payload() -> dict[str, Any]:
 def get_cache_config() -> dict[str, Any]:
     """
     读取缓存配置视图：
-    - templates: server.json / server_small.json 中的 images 段。
+    - templates: configs/current/server.json 中的 images 段。
     - defaults:  map.json defaults.images。
-    - lines:     各产线的 images 覆盖与实际生效 images。
+    - lines:     各产线的 images 覆盖与视图生效 images。
     """
     return _build_cache_config_payload()
 
@@ -751,16 +773,14 @@ def get_cache_config() -> dict[str, Any]:
 def update_cache_config(payload: CacheConfigUpdatePayload) -> dict[str, Any]:
     """
     更新缓存配置：
-    - templates: 写回到 server.json / server_small.json 的 images 段。
+    - templates: 写回到 configs/current/server.json 的 images 段。
     - defaults:  写回 map.json.defaults（深度合并）。
     - lines:     按 key 写回 map.json.lines[].images（深度合并）。
     """
     # 1. 更新全局模板
     if payload.templates is not None:
         if payload.templates.default:
-            _save_template_images("default", payload.templates.default)
-        if payload.templates.small:
-            _save_template_images("small", payload.templates.small)
+            _save_template_images(payload.templates.default)
 
     # 2. 更新 map.json 默认与产线覆盖
     root, map_payload = load_map_payload()

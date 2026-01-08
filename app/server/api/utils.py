@@ -7,19 +7,30 @@ import os
 from typing import Optional
 
 CONFIG_DIR = Path(__file__).resolve().parents[3] / "configs"
-NET_TABLE_DIR = CONFIG_DIR / "net_tabel"
-DEFAULT_DEFECT_CLASS = CONFIG_DIR / "DefectClass.json"
+TEMPLATE_DIR = CONFIG_DIR / "template"
+CURRENT_DIR = CONFIG_DIR / "current"
+DEFAULT_DEFECT_CLASS = CURRENT_DIR / "DefectClass.json"
 
 
 def _resolve_defect_class_file() -> Path:
+    CURRENT_DIR.mkdir(parents=True, exist_ok=True)
+    if not DEFAULT_DEFECT_CLASS.exists():
+        template_defect = TEMPLATE_DIR / "DefectClass.json"
+        if template_defect.exists():
+            DEFAULT_DEFECT_CLASS.write_text(
+                template_defect.read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
     env_path = os.getenv("DEFECT_CLASS_PATH")
     if env_path:
         candidate = Path(env_path)
         if candidate.exists():
             return candidate
-    fallback = NET_TABLE_DIR / "DEFAULT" / "本地测试数据" / "DefectClass.json"
-    if fallback.exists():
-        return fallback
+    line_name = os.getenv("DEFECT_LINE_NAME")
+    if line_name:
+        line_path = CURRENT_DIR / line_name / "DefectClass.json"
+        if line_path.exists():
+            return line_path
     return DEFAULT_DEFECT_CLASS
 
 

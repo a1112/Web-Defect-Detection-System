@@ -223,7 +223,7 @@ class ImageService:
                 raise
             frame_count = len(frames)
 
-        # 单帧尺寸由配置文件给出（server.json / server_small.json）
+        # 单帧尺寸由配置文件给出（server.json / map.json views）
         image_width = self.settings.images.frame_width
         image_height = self.settings.images.frame_height
 

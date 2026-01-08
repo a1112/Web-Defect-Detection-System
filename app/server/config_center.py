@@ -152,6 +152,7 @@ def create_app(manager: ProcessManager) -> FastAPI:
         current_root, current_payload = load_map_payload()
         merged = {
             "defaults": payload.defaults if payload.defaults is not None else current_payload.get("defaults") or {},
+            "views": current_payload.get("views") or {},
             "lines": payload.lines,
         }
         map_path = save_map_payload(merged)

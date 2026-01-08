@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import socket
 from pathlib import Path
 from typing import Literal, Optional
 
@@ -13,8 +12,22 @@ SAMPLE_CONFIG_NAME = "server.sample.json"
 ENV_CONFIG_KEY = "SERVER_CONFIG_PATH"
 REPO_ROOT = Path(__file__).resolve().parents[3]
 CONFIG_DIR = REPO_ROOT / "configs"
-NET_TABLE_DATA_DIR = CONFIG_DIR / "net_tabel" / "DATA"
+TEMPLATE_DIR = CONFIG_DIR / "template"
+CURRENT_DIR = CONFIG_DIR / "current"
 LEGACY_CONFIG_DIR = Path(__file__).resolve().parent
+
+
+def ensure_current_config_dir() -> Path:
+    CURRENT_DIR.mkdir(parents=True, exist_ok=True)
+    TEMPLATE_DIR.mkdir(parents=True, exist_ok=True)
+    for name in ("server.json", "map.json", "DefectClass.json"):
+        target = CURRENT_DIR / name
+        if target.exists():
+            continue
+        source = TEMPLATE_DIR / name
+        if source.exists():
+            target.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+    return CURRENT_DIR
 
 
 class DatabaseSettings(BaseModel):
@@ -181,10 +194,9 @@ class ServerSettings(BaseModel):
         env_path = os.getenv(ENV_CONFIG_KEY)
         if env_path:
             candidate_paths.append(Path(env_path))
-        data_host_dir = NET_TABLE_DATA_DIR / socket.gethostname()
-        candidate_paths.append(data_host_dir / DEFAULT_CONFIG_NAME)
-        candidate_paths.append(NET_TABLE_DATA_DIR / DEFAULT_CONFIG_NAME)
-        candidate_paths.append(CONFIG_DIR / DEFAULT_CONFIG_NAME)
+        ensure_current_config_dir()
+        candidate_paths.append(CURRENT_DIR / DEFAULT_CONFIG_NAME)
+        candidate_paths.append(TEMPLATE_DIR / DEFAULT_CONFIG_NAME)
         candidate_paths.append(CONFIG_DIR / SAMPLE_CONFIG_NAME)
         candidate_paths.append(LEGACY_CONFIG_DIR / DEFAULT_CONFIG_NAME)
         candidate_paths.append(LEGACY_CONFIG_DIR / "settings.sample.json")
@@ -205,14 +217,14 @@ def ensure_config_file(explicit_path: str | Path | None = None) -> Path:
         return target
     if explicit_path or env_path:
         raise FileNotFoundError(f"Configuration file not found at {target}")
-    data_host_dir = NET_TABLE_DATA_DIR / socket.gethostname()
-    data_candidates = [
-        data_host_dir / DEFAULT_CONFIG_NAME,
-        NET_TABLE_DATA_DIR / DEFAULT_CONFIG_NAME,
-    ]
-    for candidate in data_candidates:
-        if candidate.exists():
-            return candidate
+    ensure_current_config_dir()
+    current_candidate = CURRENT_DIR / DEFAULT_CONFIG_NAME
+    if current_candidate.exists():
+        return current_candidate
+    template_candidate = TEMPLATE_DIR / DEFAULT_CONFIG_NAME
+    if template_candidate.exists():
+        current_candidate.write_text(template_candidate.read_text(encoding="utf-8"), encoding="utf-8")
+        return current_candidate
     sample_candidates = [
         CONFIG_DIR / SAMPLE_CONFIG_NAME,
         LEGACY_CONFIG_DIR / "settings.sample.json",

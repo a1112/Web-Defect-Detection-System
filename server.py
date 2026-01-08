@@ -22,17 +22,18 @@ from app.server.net_table import load_map_config, build_config_for_line
 logger = logging.getLogger(__name__)
 REPO_ROOT = Path(__file__).resolve().parent
 CONFIG_DIR = REPO_ROOT / "configs"
+TEMPLATE_DIR = CONFIG_DIR / "template"
+CURRENT_DIR = CONFIG_DIR / "current"
 TEST_MODE_ENV = "DEFECT_TEST_MODE"
 TESTDATA_DIR_ENV = "DEFECT_TESTDATA_DIR"
 
 
-def _resolve_template(profile: str | None, net_table_root: Path | None = None) -> Path:
-    name = "server_small.json" if profile == "small" else "server.json"
-    if net_table_root:
-        candidate = net_table_root / name
-        if candidate.exists():
-            return candidate
-    return CONFIG_DIR / name
+def _resolve_template() -> Path:
+    candidate = CURRENT_DIR / "server.json"
+    if candidate.exists():
+        return candidate
+    fallback = TEMPLATE_DIR / "server.json"
+    return fallback
 
 
 def _line_port(line: dict[str, Any], fallback: int) -> int:
@@ -43,6 +44,20 @@ def _line_port(line: dict[str, Any], fallback: int) -> int:
         if isinstance(value, str) and value.isdigit():
             return int(value)
     return fallback
+
+
+def _view_port_offset(view_key: str, view_config: dict[str, Any] | None, index: int) -> int:
+    if isinstance(view_config, dict):
+        value = view_config.get("port_offset")
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str) and value.isdigit():
+            return int(value)
+    if view_key in ("2D", "default"):
+        return 0
+    if view_key == "small":
+        return 100
+    return 100 * (index + 1)
 
 
 def _line_host(line: dict[str, Any]) -> str:
@@ -256,8 +271,16 @@ class LineProcessManager:
     def get_api_list(self) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []
         for key, group in self._lines.items():
-            main_proc = next((item for item in group if item.kind == "default"), None)
+            main_proc = next((item for item in group if item.kind in ("2D", "default")), None)
             small_proc = next((item for item in group if item.kind == "small"), None)
+            view_items = [
+                {
+                    "view": item.kind,
+                    "port": item.port,
+                    "path": "/api" if item.kind in ("2D", "default") else f"/{item.kind}--api",
+                }
+                for item in group
+            ]
             process = main_proc.process if main_proc else None
             status = self._get_cached_status(key)
             items.append(
@@ -276,6 +299,7 @@ class LineProcessManager:
                     "latest_age_seconds": status.get("latest_age_seconds"),
                     "path": f"/api/{key}",
                     "small_path": f"/small--api/{key}",
+                    "views": view_items,
                 }
             )
         return items
@@ -338,7 +362,11 @@ class LineProcessManager:
     def _get_cached_status(self, key: str) -> dict[str, Any]:
         now = datetime.utcnow()
         with self._status_lock:
-            status = self._api_status.get((key, "default")) or self._api_status.get((key, "small"))
+            status = (
+                self._api_status.get((key, "2D"))
+                or self._api_status.get((key, "default"))
+                or self._api_status.get((key, "small"))
+            )
         if not status:
             return {"online": False, "latest_timestamp": None, "latest_age_seconds": None}
         age_since_seen = (now - status.last_seen).total_seconds()
@@ -377,7 +405,6 @@ def _coerce_int(value: Any) -> int | None:
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
     parser = argparse.ArgumentParser(description="Net table multi-line server launcher")
-    parser.add_argument("--hostname", default=None, help="Override hostname for net_tabel lookup")
     parser.add_argument(
         "--test_data",
         action="store_true",
@@ -396,12 +423,12 @@ def main() -> None:
         testdata_dir = (REPO_ROOT / "TestData").resolve()
         _ensure_testdata_dir(testdata_dir)
 
-    config = load_map_config(args.hostname)
+    config = load_map_config()
     defaults = config.get("defaults") or {}
-    root = config.get("root")
     lines: list[dict[str, Any]] = config.get("lines") or []
+    views: dict[str, Any] = config.get("views") or {}
     if not lines:
-        raise RuntimeError("No net_tabel lines found; check configs/net_tabel/DATA/<hostname>/map.json")
+        raise RuntimeError("No lines found; check configs/current/map.json")
 
     manager = LineProcessManager(reload=args.reload)
     base_port = 8200
@@ -409,55 +436,54 @@ def main() -> None:
         mode = (line.get("mode") or "direct").lower()
         if mode != "direct":
             continue
-        profile = line.get("profile") or line.get("api_profile")
-        template = _resolve_template(profile, root)
+        template = _resolve_template()
         if not template.exists():
             raise FileNotFoundError(f"Template config not found: {template}")
-        config_path = build_config_for_line(line, template, defaults=defaults)
         port = _line_port(line, base_port + idx)
         host = _line_host(line)
-        logger.info("Starting line '%s' on %s:%s with %s", line.get("name"), host, port, template.name)
         line_name = str(line.get("name") or "")
         line_key = str(line.get("key") or line_name)
         defect_class_path = None
-        if root and line_name:
-            candidate = Path(root) / line_name / "DefectClass.json"
+        if line_name:
+            candidate = CURRENT_DIR / line_name / "DefectClass.json"
             if candidate.exists():
                 defect_class_path = candidate
         if defect_class_path is None:
-            fallback = REPO_ROOT / "configs" / "net_tabel" / "DEFAULT" / "本地测试数据" / "DefectClass.json"
+            fallback = CURRENT_DIR / "DefectClass.json"
             if fallback.exists():
                 defect_class_path = fallback
-        manager.add_line(
-            LineProcess(
-                key=line_key,
-                name=line_name,
-                host=host,
-                port=port,
-                profile=profile,
-                config_path=config_path,
-                defect_class_path=defect_class_path,
-                ip=line.get("ip"),
-                kind="default",
-                testdata_dir=testdata_dir,
-            )
-        )
 
-        small_template = _resolve_template("small", root)
-        if small_template.exists():
-            small_config_path = build_config_for_line(line, small_template, defaults=defaults)
-            small_port = port + 100
+        view_items = list(views.items()) if isinstance(views, dict) and views else [("2D", {})]
+        for view_index, (view_key, view_config) in enumerate(view_items):
+            offset = _view_port_offset(view_key, view_config if isinstance(view_config, dict) else None, view_index)
+            view_port = port + offset
+            view_payload = view_config if isinstance(view_config, dict) else {}
+            config_path = build_config_for_line(
+                line,
+                template,
+                defaults=defaults,
+                view_name=view_key,
+                view_overrides=view_payload,
+            )
+            logger.info(
+                "Starting line '%s' view '%s' on %s:%s with %s",
+                line_name,
+                view_key,
+                host,
+                view_port,
+                template.name,
+            )
             manager.add_line(
                 LineProcess(
                     key=line_key,
                     name=line_name,
                     host=host,
-                    port=small_port,
-                    profile="small",
-                    config_path=small_config_path,
+                    port=view_port,
+                    profile=line.get("profile") or line.get("api_profile"),
+                    config_path=config_path,
                     defect_class_path=defect_class_path,
                     ip=line.get("ip"),
-                    kind="small",
+                    kind=view_key,
                     testdata_dir=testdata_dir,
                 )
             )
