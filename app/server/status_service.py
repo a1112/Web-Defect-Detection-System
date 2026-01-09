@@ -261,6 +261,7 @@ def get_status_service() -> StatusService:
     service.register_service("cache_generate", label="缓存生成", priority=80)
     service.register_service("data_refresh", label="数据刷新", priority=70)
     service.register_service("data_warmup", label="数据预热", priority=60)
+    service.register_service("image_stream", label="图像写入", priority=85)
     service.register_service("database", label="数据库连接", priority=100)
     service.register_service("image_path", label="图像路径", priority=95)
     return service

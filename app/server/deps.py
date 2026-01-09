@@ -4,6 +4,8 @@ from functools import lru_cache
 import os
 from pathlib import Path
 
+from typing import Generator
+
 from sqlalchemy.orm import Session
 
 from .config.settings import ServerSettings, ensure_config_file
@@ -56,17 +58,25 @@ def get_settings() -> ServerSettings:
     )
 
 
-def get_main_db() -> Session:
+def get_main_db() -> Generator[Session, None, None]:
     settings = get_settings()
-    return get_main_session(settings)
+    session = get_main_session(settings)
+    try:
+        yield session
+    finally:
+        session.close()
 
 
-def get_defect_db() -> Session:
+def get_defect_db() -> Generator[Session, None, None]:
     settings = get_settings()
-    return get_defect_session(settings)
+    session = get_defect_session(settings)
+    try:
+        yield session
+    finally:
+        session.close()
 
 
-def get_management_db() -> Session:
+def get_management_db() -> Generator[Session, None, None]:
     settings = get_settings()
     db_settings = settings.database
     if db_settings.drive != "sqlite" and "{ip}" in (db_settings.host or ""):
@@ -80,8 +90,15 @@ def get_management_db() -> Session:
             }
         )
         session = get_management_session(fallback_settings)
-        bootstrap_management(fallback_settings, session)
-        return session
+        try:
+            bootstrap_management(fallback_settings, session)
+            yield session
+        finally:
+            session.close()
+        return
     session = get_management_session(settings)
-    bootstrap_management(settings, session)
-    return session
+    try:
+        bootstrap_management(settings, session)
+        yield session
+    finally:
+        session.close()

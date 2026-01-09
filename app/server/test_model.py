@@ -394,11 +394,23 @@ def _copy_images(seq_no: int, config: dict[str, Any], *, image_count: int) -> in
         "seq_no": seq_no,
         "views": views,
         "image_count": log_summary["image_count"],
+        "imgNum": log_summary["image_count"],
+        "img_num": log_summary["image_count"],
         "surfaces": log_summary["surfaces"],
         "latest_index": latest_index,
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
     record_path.write_text(json.dumps(record_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    for surface_root in (top_root, bottom_root):
+        seq_dir = surface_root / str(seq_no)
+        for view in views:
+            view_dir = seq_dir / view
+            view_dir.mkdir(parents=True, exist_ok=True)
+            view_record = view_dir / "record.json"
+            view_record.write_text(
+                json.dumps(record_payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
     _append_log("添加图像", log_summary)
     return latest_index
 

@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, Query
 from fastapi import WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 
 from app.server import deps
 from app.server.api.dependencies import get_image_service
@@ -93,6 +94,9 @@ def _resolve_seq_list(
 class CacheSurfacePayload(BaseModel):
     surface: str
     view: str
+    cached: bool = False
+    image_missing: Optional[bool] = None
+    stale: Optional[bool] = None
     tile_max_level: Optional[int] = None
     tile_size: Optional[int] = None
     defect_expand: Optional[int] = None
@@ -112,6 +116,10 @@ class CacheRecordPayload(BaseModel):
 class CacheRecordsResponse(BaseModel):
     items: list[CacheRecordPayload]
     total: int
+    max_seq: Optional[int] = None
+    cache_range_min: Optional[int] = None
+    expected_tile_max_level: Optional[int] = None
+    expected_defect_expand: Optional[int] = None
 
 
 class CacheScanRequest(BaseModel):
@@ -138,6 +146,12 @@ class CacheStatusResponse(BaseModel):
     message: str
     seq_no: Optional[int] = None
     surface: Optional[str] = None
+    view: Optional[str] = None
+    cache_root_top: Optional[str] = None
+    cache_root_bottom: Optional[str] = None
+    worker_per_surface: Optional[int] = None
+    paused: bool = False
+    task: Optional[dict] = None
 
 
 class CacheSettingsPayload(BaseModel):
@@ -230,10 +244,12 @@ def list_cache_records(
     page_size: int = Query(20, ge=1, le=200),
     main_db: Session = Depends(deps.get_main_db),
     management_db: Session = Depends(deps.get_management_db),
+    image_service: ImageService = Depends(get_image_service),
 ):
     line_key = _get_line_key()
     base_query = main_db.query(Steelrecord).order_by(Steelrecord.seqNo.desc())
     total = base_query.count()
+    max_seq = main_db.query(func.max(Steelrecord.seqNo)).scalar()
     records = (
         base_query.offset((page - 1) * page_size)
         .limit(page_size)
@@ -251,31 +267,57 @@ def list_cache_records(
     for row in cache_rows:
         cache_map.setdefault(int(row.seq_no), {})[row.surface] = row
 
+    cache_settings = image_service.settings.cache
+    max_records = int(cache_settings.disk_cache_max_records or 0)
+    cache_range_min = None
+    if max_records > 0 and max_seq:
+        cache_range_min = int(max_seq) - max_records + 1
+    expected_tile_max_level = image_service.disk_cache.max_level()
+    expected_defect_expand = int(getattr(cache_settings, "defect_cache_expand", 0) or 0)
+    view_dir = image_service.settings.images.default_view
     items: list[CacheRecordPayload] = []
     for record in records:
         seq_no = int(record.seqNo)
         surfaces: list[CacheSurfacePayload] = []
         surface_rows = cache_map.get(seq_no, {})
+        cached_count = 0
         for surface in ("top", "bottom"):
             row = surface_rows.get(surface)
-            if row is None:
-                continue
+            cached = row is not None
+            view_name = row.view if row is not None else view_dir
+            stale = False
+            if row is not None:
+                if expected_tile_max_level and row.tile_max_level is not None:
+                    stale = row.tile_max_level != expected_tile_max_level
+                if expected_defect_expand and row.defect_expand is not None:
+                    stale = stale or (row.defect_expand != expected_defect_expand)
+            image_missing = False
+            try:
+                frames = image_service._list_frame_paths(surface, seq_no, view_name)
+                image_missing = len(frames) == 0
+            except FileNotFoundError:
+                image_missing = True
             surfaces.append(
                 CacheSurfacePayload(
                     surface=surface,
-                    view=row.view,
-                    tile_max_level=row.tile_max_level,
-                    tile_size=row.tile_size,
-                    defect_expand=row.defect_expand,
-                    defect_cache_enabled=row.defect_cache_enabled,
-                    disk_cache_enabled=row.disk_cache_enabled,
-                    updated_at=row.updated_at,
+                    view=view_name,
+                    cached=cached,
+                    image_missing=image_missing,
+                    stale=stale,
+                    tile_max_level=row.tile_max_level if row else None,
+                    tile_size=row.tile_size if row else None,
+                    defect_expand=row.defect_expand if row else None,
+                    defect_cache_enabled=row.defect_cache_enabled if row else None,
+                    disk_cache_enabled=row.disk_cache_enabled if row else bool(cache_settings.disk_cache_enabled),
+                    updated_at=row.updated_at if row else None,
                 )
             )
+            if cached:
+                cached_count += 1
         status = "none"
-        if len(surfaces) == 1:
+        if cached_count == 1:
             status = "partial"
-        elif len(surfaces) >= 2:
+        elif cached_count >= 2:
             status = "complete"
         items.append(
             CacheRecordPayload(
@@ -287,7 +329,14 @@ def list_cache_records(
             )
         )
 
-    return CacheRecordsResponse(items=items, total=total)
+    return CacheRecordsResponse(
+        items=items,
+        total=total,
+        max_seq=int(max_seq) if max_seq is not None else None,
+        cache_range_min=cache_range_min,
+        expected_tile_max_level=expected_tile_max_level,
+        expected_defect_expand=expected_defect_expand,
+    )
 
 
 @router.post("/cache/scan", response_model=CacheScanResponse)
@@ -366,12 +415,34 @@ async def cache_status_ws(websocket: WebSocket):
 @router.get("/cache/status", response_model=CacheStatusResponse)
 def get_cache_status(image_service: ImageService = Depends(get_image_service)):
     status = image_service.get_cache_status()
+    image_settings = image_service.settings.images
+    cache_settings = image_service.settings.cache
+    top_root = image_settings.disk_cache_top_root or image_settings.top_root
+    bottom_root = image_settings.disk_cache_bottom_root or image_settings.bottom_root
     return CacheStatusResponse(
         state=str(status.get("state") or "ready"),
         message=str(status.get("message") or "就绪"),
         seq_no=status.get("seq_no"),
         surface=status.get("surface"),
+        view=status.get("view"),
+        cache_root_top=str(top_root) if top_root else None,
+        cache_root_bottom=str(bottom_root) if bottom_root else None,
+        worker_per_surface=1,
+        paused=bool(status.get("paused") or False),
+        task=status.get("task"),
     )
+
+
+@router.post("/cache/pause")
+def pause_cache(image_service: ImageService = Depends(get_image_service)):
+    image_service.pause_cache_tasks()
+    return {"ok": True}
+
+
+@router.post("/cache/resume")
+def resume_cache(image_service: ImageService = Depends(get_image_service)):
+    image_service.resume_cache_tasks()
+    return {"ok": True}
 
 
 @router.get("/cache/settings", response_model=CacheSettingsPayload)

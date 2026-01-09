@@ -5,6 +5,7 @@ import logging
 import threading
 import queue
 import shutil
+import time
 from pathlib import Path
 from typing import List, Optional, Tuple
 import json
@@ -76,6 +77,8 @@ class ImageService:
         )
         self._disk_cache_stop = threading.Event()
         self._disk_cache_thread_started = False
+        self._image_watch_stop = threading.Event()
+        self._image_watch_thread_started = False
 
         self._tile_prefetch_started = False
         self._tile_prefetch: Optional[TilePrefetchManager] = None
@@ -96,28 +99,122 @@ class ImageService:
             "message": "就绪",
             "seq_no": None,
             "surface": None,
+            "view": self.settings.images.default_view,
+            "paused": False,
+            "task": None,
         }
         self._cache_task_state: Optional[str] = None
         self._cache_active_count = 0
         self._cache_task_queue: queue.Queue[tuple[str, object] | None] = queue.Queue()
         self._cache_task_thread_started = False
+        self._cache_active_seqs: dict[int, set[str]] = {}
+        self._steel_id_cache: dict[int, str] = {}
+        self._cache_pause = threading.Event()
+        self._cache_abort = threading.Event()
 
     def get_cache_status(self) -> dict[str, object]:
         with self._cache_status_lock:
             return dict(self._cache_status)
 
-    def _update_cache_status_service(self, state: str, message: str, seq_no: int | None = None, surface: str | None = None) -> None:
+    def pause_cache_tasks(self) -> None:
+        if self._cache_pause.is_set():
+            return
+        self._cache_pause.set()
+        self._set_cache_status(state="warning", message="缓存已暂停")
+
+    def resume_cache_tasks(self) -> None:
+        if not self._cache_pause.is_set():
+            return
+        self._cache_pause.clear()
+        self._set_cache_status(state="ready", message="就绪")
+
+    def _set_cache_status(
+        self,
+        *,
+        state: str,
+        message: str,
+        seq_no: int | None = None,
+        surface: str | None = None,
+        surfaces: list[str] | None = None,
+        task: dict[str, object] | None = None,
+        emit_log: bool = True,
+    ) -> None:
+        with self._cache_status_lock:
+            self._cache_status = {
+                "state": state,
+                "message": message,
+                "seq_no": seq_no,
+                "surface": surface,
+                "view": self.settings.images.default_view,
+                "paused": self._cache_pause.is_set(),
+                "task": task,
+            }
+        self._update_cache_status_service(
+            state,
+            message,
+            seq_no,
+            surface,
+            surfaces=surfaces,
+            emit_log=emit_log,
+        )
+
+    def _update_cache_status_service(
+        self,
+        state: str,
+        message: str,
+        seq_no: int | None = None,
+        surface: str | None = None,
+        surfaces: list[str] | None = None,
+        emit_log: bool = True,
+    ) -> None:
         try:
             from app.server.status_service import get_status_service
 
-            payload = {"seq_no": seq_no, "surface": surface}
+            cache_settings = self.settings.cache
+            if surfaces:
+                surfaces = sorted(set(surfaces))
+            cache_dir = None
+            if seq_no is not None and surface:
+                cache_dir = str(
+                    self.disk_cache.cache_dir(
+                        self._cache_root(surface),
+                        int(seq_no),
+                        view=self.settings.images.default_view,
+                    )
+                )
+            cache_dirs = None
+            if seq_no is not None and surfaces:
+                cache_dirs = {
+                    item: str(
+                        self.disk_cache.cache_dir(
+                            self._cache_root(item),
+                            int(seq_no),
+                            view=self.settings.images.default_view,
+                        )
+                    )
+                    for item in surfaces
+                }
+            payload = {
+                "seq_no": seq_no,
+                "surface": surface,
+                "surfaces": surfaces,
+                "view": self.settings.images.default_view,
+                "cache_root": str(self._cache_root(surface)) if surface else None,
+                "cache_dir": cache_dir,
+                "cache_dirs": cache_dirs,
+                "steel_no": self._resolve_steel_id(seq_no) if seq_no is not None else None,
+                "precache_levels": int(getattr(cache_settings, "disk_precache_levels", 0) or 0),
+                "defect_cache_enabled": bool(getattr(cache_settings, "defect_cache_enabled", True)),
+                "defect_cache_expand": int(getattr(cache_settings, "defect_cache_expand", 0) or 0),
+                "disk_cache_enabled": bool(getattr(cache_settings, "disk_cache_enabled", False)),
+            }
             get_status_service().update_service(
                 "cache_generate",
                 state=state,
                 message=message,
                 data={k: v for k, v in payload.items() if v is not None},
             )
-            if state == "running":
+            if emit_log and state == "running":
                 get_status_service().append_log(
                     "cache_generate",
                     level="info",
@@ -130,24 +227,12 @@ class ImageService:
     def begin_cache_task(self, state: str, message: str) -> None:
         with self._cache_status_lock:
             self._cache_task_state = state
-            self._cache_status = {
-                "state": state,
-                "message": message,
-                "seq_no": None,
-                "surface": None,
-            }
-        self._update_cache_status_service("running", message)
+        self._set_cache_status(state="running", message=message)
 
     def end_cache_task(self) -> None:
         with self._cache_status_lock:
             self._cache_task_state = None
-            self._cache_status = {
-                "state": "ready",
-                "message": "就绪",
-                "seq_no": None,
-                "surface": None,
-            }
-        self._update_cache_status_service("ready", "就绪")
+        self._set_cache_status(state="ready", message="就绪")
 
     def _begin_background_cache(self, seq_no: int, surface: str) -> None:
         with self._cache_status_lock:
@@ -155,13 +240,16 @@ class ImageService:
             if self._cache_task_state:
                 return
             surface_label = "上表" if surface == "top" else "下表"
-            self._cache_status = {
-                "state": "caching",
-                "message": f"正在缓存 {seq_no} {surface_label}",
-                "seq_no": seq_no,
-                "surface": surface,
-            }
-        self._update_cache_status_service("running", self._cache_status.get("message") or "", seq_no, surface)
+            active = self._cache_active_seqs.setdefault(seq_no, set())
+            active.add(surface)
+            surfaces = sorted(active)
+        self._set_cache_status(
+            state="running",
+            message=f"正在缓存 {seq_no} {surface_label}",
+            seq_no=seq_no,
+            surface=surface,
+            surfaces=surfaces,
+        )
 
     def _end_background_cache(self) -> None:
         with self._cache_status_lock:
@@ -169,13 +257,7 @@ class ImageService:
             if self._cache_task_state:
                 return
             if self._cache_active_count == 0:
-                self._cache_status = {
-                    "state": "ready",
-                    "message": "就绪",
-                    "seq_no": None,
-                    "surface": None,
-                }
-                self._update_cache_status_service("ready", "就绪")
+                self._set_cache_status(state="ready", message="就绪")
 
     # ------------------------------------------------------------------ #
     # Defect warmup helpers
@@ -281,14 +363,255 @@ class ImageService:
         if not self.settings.cache.disk_cache_enabled:
             return
         precache_levels = levels if levels is not None else self.settings.cache.disk_precache_levels
-        for surface in ("top", "bottom"):
-            self._precache_seq(surface, seq_no, precache_levels=precache_levels)
+        self._precache_seq_pair(seq_no, precache_levels=precache_levels)
 
     def enqueue_cache_delete(self, seqs: list[int]) -> None:
+        self._cache_abort.set()
+        self._clear_cache_tasks()
         self._cache_task_queue.put(("delete", seqs))
 
     def enqueue_cache_rebuild(self, seqs: list[int], *, force: bool) -> None:
+        self._cache_abort.set()
+        self._clear_cache_tasks()
         self._cache_task_queue.put(("rebuild", {"seqs": seqs, "force": force}))
+
+    def _clear_cache_tasks(self) -> None:
+        while True:
+            try:
+                item = self._cache_task_queue.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                self._cache_task_queue.task_done()
+            except ValueError:
+                break
+
+    def _append_cache_log(self, message: str, data: dict[str, object]) -> None:
+        try:
+            from app.server.status_service import get_status_service
+
+            get_status_service().append_log(
+                "cache_generate",
+                level="info",
+                message=message,
+                data={k: v for k, v in (data or {}).items() if v is not None},
+            )
+        except Exception:
+            return
+
+    def _precache_seq_pair(
+        self,
+        seq_no: int,
+        *,
+        precache_levels: int,
+        force: bool = False,
+        surfaces: Optional[list[str]] = None,
+        task_info: Optional[dict[str, object]] = None,
+        message: Optional[str] = None,
+    ) -> None:
+        surfaces = surfaces or ["top", "bottom"]
+        surfaces = [item for item in surfaces if item in ("top", "bottom")]
+        if not surfaces:
+            return
+        if not force and not self._is_seq_closed(seq_no, view_dir=self.settings.images.default_view):
+            return
+        start_time = time.monotonic()
+        if task_info is None:
+            task_info = {
+                "type": "precache",
+                "total": 1,
+                "done": 0,
+                "current_seq": seq_no,
+            }
+        self._set_cache_status(
+            state="running",
+            message=message or f"正在缓存 {seq_no}",
+            seq_no=seq_no,
+            surface=surfaces[0],
+            surfaces=surfaces,
+            task=task_info,
+        )
+        for surface in surfaces:
+            if self._cache_abort.is_set():
+                break
+            self._precache_seq(
+                surface,
+                seq_no,
+                precache_levels=precache_levels,
+                force=force,
+                emit_status=False,
+            )
+        elapsed = time.monotonic() - start_time
+        self._set_cache_status(
+            state="running",
+            message=f"缓存完成 {seq_no}",
+            seq_no=seq_no,
+            surface=surfaces[0],
+            surfaces=surfaces,
+            task=task_info,
+            emit_log=False,
+        )
+        self._append_cache_log(
+            "缓存完成",
+            {
+                "seq_no": seq_no,
+                "surfaces": surfaces,
+                "elapsed_seconds": round(elapsed, 3),
+                "view": self.settings.images.default_view,
+            },
+        )
+
+    def _wait_if_cache_paused(self, task_info: Optional[dict[str, object]] = None) -> None:
+        while self._cache_pause.is_set() and not self._disk_cache_stop.is_set():
+            self._set_cache_status(state="warning", message="缓存已暂停", task=task_info)
+            self._disk_cache_stop.wait(0.5)
+
+    def _list_latest_seq_candidates(self, *, limit: int = 10) -> list[int]:
+        seqs: set[int] = set()
+        for surface in ("top", "bottom"):
+            root = self._surface_root(surface)
+            max_seq = self._find_max_seq(root)
+            if max_seq is None:
+                continue
+            start = max(1, max_seq - max(1, limit) + 1)
+            seqs.update(range(start, max_seq + 1))
+        return sorted(seqs)
+
+    def _needs_precache_seq(self, seq_no: int) -> bool:
+        view_dir = self.settings.images.default_view
+        expected_level = self.disk_cache.max_level()
+        expected_expand = self.disk_cache.defect_expand
+        for surface in ("top", "bottom"):
+            meta = self.disk_cache.read_meta(self._cache_root(surface), seq_no, view=view_dir)
+            if not meta:
+                return True
+            meta_tile = meta.get("tile") or {}
+            meta_defects = meta.get("defects") or {}
+            meta_level = int(meta_tile.get("max_level") or 0)
+            meta_expand = int(meta_defects.get("expand") or 0)
+            if meta_level < expected_level:
+                return True
+            if meta_expand != expected_expand:
+                return True
+        return False
+
+    def _run_cache_task_delete(self, seqs: list[int]) -> None:
+        seq_list = [int(seq) for seq in seqs]
+        seq_list = sorted(set(seq_list))
+        total = len(seq_list)
+        task_info: dict[str, object] = {
+            "type": "delete",
+            "total": total,
+            "done": 0,
+            "current_seq": None,
+        }
+        if total == 0:
+            self._set_cache_status(state="ready", message="就绪", task=task_info)
+            return
+        self._cache_abort.clear()
+        self._append_cache_log("缓存删除开始", {"total": total})
+        for index, seq_no in enumerate(seq_list, start=1):
+            if self._cache_abort.is_set() or self._disk_cache_stop.is_set():
+                break
+            self._wait_if_cache_paused(task_info)
+            task_info["current_seq"] = seq_no
+            task_info["done"] = index - 1
+            start_time = time.monotonic()
+            self._set_cache_status(
+                state="running",
+                message=f"缓存删除 {seq_no}",
+                seq_no=seq_no,
+                task=task_info,
+            )
+            self._remove_cache_seq(seq_no)
+            elapsed = time.monotonic() - start_time
+            task_info["done"] = index
+            self._append_cache_log(
+                "缓存删除完成",
+                {"seq_no": seq_no, "elapsed_seconds": round(elapsed, 3)},
+            )
+        self._cache_abort.clear()
+        self._set_cache_status(state="ready", message="就绪", task=task_info)
+
+    def _run_cache_task_rebuild(self, seqs: list[int], *, force: bool) -> None:
+        seq_list = [int(seq) for seq in seqs]
+        seq_list = sorted(set(seq_list))
+        total = len(seq_list)
+        task_info: dict[str, object] = {
+            "type": "rebuild",
+            "total": total,
+            "done": 0,
+            "current_seq": None,
+            "force": force,
+        }
+        if total == 0:
+            self._set_cache_status(state="ready", message="就绪", task=task_info)
+            return
+        self._cache_abort.clear()
+        self._append_cache_log("缓存重建开始", {"total": total, "force": force})
+        for index, seq_no in enumerate(seq_list, start=1):
+            if self._cache_abort.is_set() or self._disk_cache_stop.is_set():
+                break
+            self._wait_if_cache_paused(task_info)
+            task_info["current_seq"] = seq_no
+            task_info["done"] = index - 1
+            start_time = time.monotonic()
+            if force:
+                self._remove_cache_seq(seq_no)
+            self._precache_seq_pair(
+                seq_no,
+                precache_levels=self.settings.cache.disk_precache_levels,
+                force=force,
+                task_info=task_info,
+                message=f"缓存重建 {seq_no}",
+            )
+            elapsed = time.monotonic() - start_time
+            task_info["done"] = index
+            self._append_cache_log(
+                "缓存重建完成",
+                {"seq_no": seq_no, "elapsed_seconds": round(elapsed, 3)},
+            )
+        self._cache_abort.clear()
+        self._set_cache_status(state="ready", message="就绪", task=task_info)
+
+    def _run_cache_task_auto(self, *, precache_levels: int) -> None:
+        seq_list = self._list_latest_seq_candidates(limit=10)
+        if not seq_list:
+            self._set_cache_status(state="ready", message="等待缓存任务", task=None)
+            return
+        task_info: dict[str, object] = {
+            "type": "auto",
+            "total": len(seq_list),
+            "done": 0,
+            "current_seq": None,
+        }
+        if not any(self._needs_precache_seq(seq_no) for seq_no in seq_list):
+            task_info["done"] = task_info["total"]
+            wait_seq = seq_list[-1] + 1
+            task_info["current_seq"] = wait_seq
+            self._set_cache_status(
+                state="ready",
+                message=f"等待 {wait_seq} 数据中",
+                seq_no=wait_seq,
+                task=task_info,
+            )
+            return
+        for index, seq_no in enumerate(seq_list, start=1):
+            if self._cache_abort.is_set() or self._disk_cache_stop.is_set():
+                break
+            self._wait_if_cache_paused(task_info)
+            if not self._needs_precache_seq(seq_no):
+                task_info["done"] = index
+                continue
+            task_info["current_seq"] = seq_no
+            task_info["done"] = index - 1
+            self._precache_seq_pair(
+                seq_no,
+                precache_levels=precache_levels,
+                task_info=task_info,
+                message=f"自动缓存 {seq_no}",
+            )
+            task_info["done"] = index
 
     def _remove_cache_seq(self, seq_no: int) -> None:
         view_dir = self.settings.images.default_view
@@ -303,6 +626,7 @@ class ImageService:
         image_settings = self.settings.images
         cache_settings = self.settings.cache
         self._start_tile_prefetch_threads()
+        self._start_image_watch_thread()
         if not cache_settings.disk_cache_enabled or self.disk_cache.read_only:
             return
         logger.info(
@@ -327,6 +651,7 @@ class ImageService:
         if self._tile_prefetch is not None:
             self._tile_prefetch.stop()
             self._tile_prefetch_started = False
+        self._image_watch_stop.set()
         if not self.settings.cache.disk_cache_enabled:
             return
         self._disk_cache_stop.set()
@@ -383,7 +708,7 @@ class ImageService:
                     continue
                 try:
                     payload = json.loads(record_path.read_text(encoding="utf-8"))
-                    raw = payload.get("imgNum") or payload.get("img_num")
+                    raw = payload.get("imgNum") or payload.get("img_num") or payload.get("image_count")
                     if isinstance(raw, int) and raw > 0:
                         frame_count = raw
                         break
@@ -769,7 +1094,7 @@ class ImageService:
 
             data = encode_image(tile_img, fmt=fmt)
             self.tile_cache.put(cache_key, data)
-            if fmt.upper() == "JPEG":
+            if fmt.upper() == "JPEG" and (level == 0 or self._is_seq_closed(seq_no, view_dir=view_dir)):
                 self.disk_cache.write_tile(
                     cache_root,
                     seq_no_fs,
@@ -1101,12 +1426,90 @@ class ImageService:
         logger.info("disk-cache worker threads 启动")
         if not self._cache_task_thread_started:
             self._cache_task_thread_started = True
-            threading.Thread(target=self._disk_cache_task_loop, daemon=True).start()
-        if self.settings.cache.disk_precache_enabled:
             threading.Thread(target=self._disk_cache_precache_loop, daemon=True).start()
-            logger.info("disk-cache precache thread 启动")
+            logger.info("disk-cache task thread 启动")
         threading.Thread(target=self._disk_cache_cleanup_loop, daemon=True).start()
         logger.info("disk-cache cleanup thread 启动")
+
+    def _start_image_watch_thread(self) -> None:
+        if self._image_watch_thread_started:
+            return
+        self._image_watch_thread_started = True
+        self._image_watch_stop.clear()
+        threading.Thread(target=self._image_watch_loop, daemon=True).start()
+
+    def _image_watch_loop(self) -> None:
+        last_snapshot: dict[str, object] | None = None
+        view_dir = self.settings.images.default_view
+        while not self._image_watch_stop.is_set():
+            snapshot = self._scan_latest_frames(view_dir)
+            if snapshot and snapshot != last_snapshot:
+                last_snapshot = snapshot
+                self._update_image_stream_status(snapshot)
+            self._image_watch_stop.wait(2)
+
+    def _scan_latest_frames(self, view_dir: str) -> dict[str, object] | None:
+        top_root = self._surface_root("top")
+        bottom_root = self._surface_root("bottom")
+        top_seq = self._find_max_seq(top_root)
+        bottom_seq = self._find_max_seq(bottom_root)
+        seq_no = max([seq for seq in (top_seq, bottom_seq) if seq is not None], default=None)
+        if seq_no is None:
+            return None
+        top_count = self._count_view_frames(top_root, seq_no, view_dir)
+        bottom_count = self._count_view_frames(bottom_root, seq_no, view_dir)
+        closed = self._is_seq_closed(seq_no, view_dir=view_dir)
+        return {
+            "seq_no": seq_no,
+            "top_count": top_count,
+            "bottom_count": bottom_count,
+            "count": min(top_count, bottom_count) if top_count and bottom_count else max(top_count, bottom_count),
+            "view": view_dir,
+            "closed": closed,
+        }
+
+    def _count_view_frames(self, surface_root: Path, seq_no: int, view_dir: str) -> int:
+        seq_path = surface_root / str(seq_no) / view_dir
+        if not seq_path.exists():
+            return 0
+        count = 0
+        try:
+            for entry in seq_path.iterdir():
+                if entry.is_file() and entry.suffix.lower() == ".jpg":
+                    count += 1
+        except OSError:
+            return 0
+        return count
+
+    def _update_image_stream_status(self, snapshot: dict[str, object]) -> None:
+        try:
+            from app.server.status_service import get_status_service
+
+            seq_no = snapshot.get("seq_no")
+            count = snapshot.get("count")
+            view = snapshot.get("view")
+            closed = bool(snapshot.get("closed"))
+            state = "ready" if closed else "running"
+            if count:
+                message = f"图像写入{'完成' if closed else '中'} {seq_no}-{count}"
+            else:
+                message = "图像写入中"
+            data = {
+                "seq_no": seq_no,
+                "count": count,
+                "top_count": snapshot.get("top_count"),
+                "bottom_count": snapshot.get("bottom_count"),
+                "view": view,
+                "closed": closed,
+            }
+            get_status_service().update_service(
+                "image_stream",
+                state=state,
+                message=message,
+                data={k: v for k, v in data.items() if v is not None},
+            )
+        except Exception:
+            return
 
     def _disk_cache_task_loop(self) -> None:
         while not self._disk_cache_stop.is_set():
@@ -1139,52 +1542,44 @@ class ImageService:
         settings = self.settings.cache
         scan_interval = settings.disk_cache_scan_interval_seconds
         precache_levels = settings.disk_precache_levels
-        worker_count = max(1, int(settings.disk_precache_workers))
-        last_seq_by_surface: dict[str, int] = {"top": 0, "bottom": 0}
-        task_queue: queue.Queue[tuple[str, int] | None] = queue.Queue()
-
-        def worker_loop() -> None:
-            while not self._disk_cache_stop.is_set():
-                item = task_queue.get()
-                if item is None:
-                    task_queue.task_done()
-                    break
-                surface, seq = item
-                try:
-                    self._precache_seq(surface, seq, precache_levels=precache_levels)
-                except Exception:
-                    logger.exception("disk-cache precache 失败 surface=%s seq=%s", surface, seq)
-                finally:
-                    task_queue.task_done()
-
-        for _ in range(worker_count):
-            threading.Thread(target=worker_loop, daemon=True).start()
 
         while not self._disk_cache_stop.is_set():
-            # 先根据 cache.json 与当前配置比对，补充/刷新已有缓存
-            try:
-                self._refresh_disk_cache_meta(precache_levels=precache_levels)
-            except Exception:
-                logger.exception("disk-cache meta refresh 失败")
+            if self._cache_pause.is_set():
+                self._set_cache_status(state="warning", message="缓存已暂停")
+                self._disk_cache_stop.wait(1.0)
+                continue
 
-            for surface in ("top", "bottom"):
-                root = self._surface_root(surface)
-                max_seq = self._find_max_seq(root)
-                current = last_seq_by_surface.get(surface, 0)
-                if max_seq is None or max_seq <= current:
-                    continue
-                for seq in range(current + 1, max_seq + 1):
-                    view_dir = self.settings.images.default_view
-                    meta = self.disk_cache.read_meta(self._cache_root(surface), seq, view=view_dir)
-                    if meta:
-                        continue
-                    task_queue.put((surface, seq))
-                last_seq_by_surface[surface] = max_seq
-            task_queue.join()
+            task = None
+            try:
+                task = self._cache_task_queue.get_nowait()
+            except queue.Empty:
+                task = None
+
+            if task is not None:
+                name, payload = task
+                try:
+                    if name == "delete":
+                        seqs = payload if isinstance(payload, list) else []
+                        self._run_cache_task_delete(seqs)
+                    elif name == "rebuild":
+                        data = payload if isinstance(payload, dict) else {}
+                        seqs = data.get("seqs") or []
+                        force = bool(data.get("force"))
+                        self._run_cache_task_rebuild(seqs, force=force)
+                finally:
+                    self._cache_task_queue.task_done()
+                continue
+
+            if not settings.disk_precache_enabled:
+                self._disk_cache_stop.wait(scan_interval)
+                continue
+
+            try:
+                self._run_cache_task_auto(precache_levels=precache_levels)
+            except Exception:
+                logger.exception("disk-cache auto task failed")
+
             self._disk_cache_stop.wait(scan_interval)
-        for _ in range(worker_count):
-            task_queue.put(None)
-        task_queue.join()
 
     def _disk_cache_cleanup_loop(self) -> None:
         settings = self.settings.cache
@@ -1201,9 +1596,21 @@ class ImageService:
                         continue
             self._disk_cache_stop.wait(interval)
 
-    def _precache_seq(self, surface: str, seq_no: int, *, precache_levels: int, force: bool = False) -> None:
-        self._begin_background_cache(seq_no, surface)
+    def _precache_seq(
+        self,
+        surface: str,
+        seq_no: int,
+        *,
+        precache_levels: int,
+        force: bool = False,
+        emit_status: bool = True,
+    ) -> None:
+        if emit_status:
+            self._begin_background_cache(seq_no, surface)
         try:
+            if not force and not self._is_seq_closed(seq_no, view_dir=self.settings.images.default_view):
+                logger.info("disk-cache precache skip open seq=%s view=%s", seq_no, self.settings.images.default_view)
+                return
             view_dir = self.settings.images.default_view
             meta = self.disk_cache.read_meta(self._cache_root(surface), seq_no, view=view_dir)
             if meta and not force:
@@ -1250,7 +1657,8 @@ class ImageService:
                         )
             logger.info("disk-cache precache %s/%s/%s 完成", surface, seq_no, view_dir)
         finally:
-            self._end_background_cache()
+            if emit_status:
+                self._end_background_cache()
 
     def _refresh_disk_cache_meta(self, *, precache_levels: int) -> None:
         """
@@ -1304,6 +1712,27 @@ class ImageService:
     def _find_max_seq(self, root: Path) -> Optional[int]:
         seqs = self._list_seq_dirs(root)
         return seqs[-1] if seqs else None
+
+    def _record_path(self, surface_root: Path, seq_no: int, view_dir: str) -> Path:
+        return surface_root / str(seq_no) / view_dir / "record.json"
+
+    def _is_seq_closed(self, seq_no: int, *, view_dir: str) -> bool:
+        view_dir = view_dir or self.settings.images.default_view
+        has_surface = False
+        for surface in ("top", "bottom"):
+            surface_root = self._surface_root(surface)
+            if not surface_root.exists():
+                return False
+            has_surface = True
+            view_record = self._record_path(surface_root, seq_no, view_dir)
+            if view_record.exists():
+                continue
+            if view_dir.lower() != "2d":
+                fallback = self._record_path(surface_root, seq_no, "2D")
+                if fallback.exists():
+                    continue
+            return False
+        return has_surface
 
     # --------------------------------------------------------------------- #
     # Internal helpers
@@ -1465,6 +1894,26 @@ class ImageService:
         files = list(folder.glob(f"*.{ext}"))
         files.sort(key=self._frame_sort_key)
         return files
+
+    def _resolve_steel_id(self, seq_no: int) -> str | None:
+        if seq_no in self._steel_id_cache:
+            return self._steel_id_cache.get(seq_no)
+        try:
+            from app.server import deps
+            from app.server.db.models.ncdplate import Steelrecord
+
+            with deps.get_main_db() as session:
+                steel_id = (
+                    session.query(Steelrecord.steelID)
+                    .filter(Steelrecord.seqNo == int(seq_no))
+                    .order_by(Steelrecord.id.desc())
+                    .scalar()
+                )
+            if steel_id:
+                self._steel_id_cache[int(seq_no)] = str(steel_id)
+            return str(steel_id) if steel_id else None
+        except Exception:
+            return None
 
     @staticmethod
     def _frame_sort_key(path: Path):
