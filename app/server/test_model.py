@@ -22,6 +22,7 @@ from app.server.status_service import get_status_service
 import os
 
 logger = logging.getLogger("test_model")
+get_status_service().register_service("image_generate", label="图像生成", priority=90)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_DIR = REPO_ROOT / "configs"
@@ -37,8 +38,7 @@ router = APIRouter(prefix="/config/test_model")
 DEFAULT_CONFIG = {
     "enabled": False,
     "record_interval_seconds": 5,
-    "auto_add_images": False,
-    "auto_add_defects": False,
+    "generate_defects": False,
     "defect_interval_seconds": 3,
     "defects_per_interval": 5,
     "length_range": [1000, 6000],
@@ -55,7 +55,6 @@ DEFAULT_CONFIG = {
     "image_count_max": 20,
     "image_interval_ms": 50,
     "views": ["2D", "small"],
-    "generate_small_view": True,
 }
 
 _worker_lock = threading.Lock()
@@ -91,6 +90,8 @@ def _load_config() -> dict[str, Any]:
         return dict(DEFAULT_CONFIG)
     merged = dict(DEFAULT_CONFIG)
     merged.update(payload if isinstance(payload, dict) else {})
+    if "generate_defects" not in merged:
+        merged["generate_defects"] = bool(merged.get("auto_add_defects"))
     if merged.get("last_seq") in (None, "", 0):
         merged["last_seq"] = _resolve_last_seq(merged)
     return merged
@@ -262,11 +263,15 @@ def _resolve_last_seq(config: dict[str, Any] | None = None) -> int:
 
 
 def _copy_images(seq_no: int, config: dict[str, Any], *, image_count: int) -> int | None:
+    def _sort_key(path: Path) -> tuple[int, int | str]:
+        try:
+            return (0, int(path.stem))
+        except ValueError:
+            return (1, path.stem)
+
     started_at = time.time()
     source_seq = int(config.get("source_seq") or 1)
     views = config.get("views") or ["2D"]
-    if not config.get("generate_small_view", True):
-        views = [view for view in views if str(view).lower() != "small"] or ["2D"]
     image_interval_ms = int(config.get("image_interval_ms") or 0)
     top_root, bottom_root = _image_roots(config)
     log_summary: dict[str, Any] = {
@@ -278,36 +283,51 @@ def _copy_images(seq_no: int, config: dict[str, Any], *, image_count: int) -> in
         "missing_views": [],
         "image_interval_ms": image_interval_ms,
     }
-    latest_index: int | None = None
-    actual_count: int | None = None
+
+    surface_info: dict[str, dict[str, Any]] = {}
     for root in (top_root, bottom_root):
         surface = "top" if root == top_root else "bottom"
-        surface_summary = {"surface": surface, "files": 0}
         source_dir = root / str(source_seq)
         if not source_dir.exists():
             raise FileNotFoundError(source_dir)
-        target_dir = root / str(seq_no)
-        target_dir.mkdir(parents=True, exist_ok=True)
         view_files: dict[str, list[Path]] = {}
         available_counts: list[int] = []
         for view in views:
             view_dir = source_dir / view
             if not view_dir.exists():
-                log_summary["missing_views"].append(view)
+                log_summary["missing_views"].append(f"{surface}:{view}")
                 view_files[view] = []
                 continue
-            files = sorted([p for p in view_dir.iterdir() if p.is_file() and p.suffix.lower() == ".jpg"])
+            files = sorted(
+                [p for p in view_dir.iterdir() if p.is_file() and p.suffix.lower() == ".jpg"],
+                key=_sort_key,
+            )
             if not files:
-                log_summary["missing_views"].append(view)
+                log_summary["missing_views"].append(f"{surface}:{view}")
                 view_files[view] = []
                 continue
             view_files[view] = files
             available_counts.append(len(files))
-        if not available_counts:
-            log_summary["surfaces"].append(surface_summary)
-            continue
-        effective_count = max(1, min(image_count, min(available_counts)))
-        actual_count = effective_count
+        surface_info[surface] = {
+            "root": root,
+            "view_files": view_files,
+            "available_count": min(available_counts) if available_counts else 0,
+        }
+
+    available_per_surface = [
+        info["available_count"]
+        for info in surface_info.values()
+        if int(info.get("available_count") or 0) > 0
+    ]
+    if not available_per_surface:
+        log_summary["elapsed_seconds"] = round(time.time() - started_at, 2)
+        _append_log("添加图像", log_summary)
+        return None
+    effective_count = max(1, min(image_count, min(available_per_surface)))
+
+    selected_by_surface: dict[str, dict[str, list[Path]]] = {}
+    for surface, info in surface_info.items():
+        view_files = info.get("view_files") or {}
         selected_by_view: dict[str, list[Path]] = {}
         for view, files in view_files.items():
             if not files:
@@ -315,9 +335,13 @@ def _copy_images(seq_no: int, config: dict[str, Any], *, image_count: int) -> in
                 continue
             mid = len(files) // 2
             start = max(0, mid - effective_count // 2)
-            selected_by_view[view] = files[start:start + effective_count]
+            selected_by_view[view] = files[start : start + effective_count]
+        selected_by_surface[surface] = selected_by_view
 
-        max_existing = 0
+    max_existing = 0
+    for surface, info in surface_info.items():
+        root = info["root"]
+        target_dir = root / str(seq_no)
         for view in views:
             target_view = target_dir / view
             if not target_view.exists():
@@ -329,11 +353,23 @@ def _copy_images(seq_no: int, config: dict[str, Any], *, image_count: int) -> in
                     max_existing = max(max_existing, int(existing.stem))
                 except ValueError:
                     continue
-        start_index = max_existing + 1
-        for offset in range(effective_count):
-            current_index = start_index + offset
+    start_index = max_existing + 1
+    latest_index: int | None = None
+
+    for offset in range(effective_count):
+        current_index = start_index + offset
+        for surface, info in surface_info.items():
+            root = info["root"]
+            target_dir = root / str(seq_no)
+            surface_summary = next(
+                (item for item in log_summary["surfaces"] if item.get("surface") == surface),
+                None,
+            )
+            if not surface_summary:
+                surface_summary = {"surface": surface, "files": 0}
+                log_summary["surfaces"].append(surface_summary)
             for view in views:
-                selected = selected_by_view.get(view) or []
+                selected = selected_by_surface.get(surface, {}).get(view) or []
                 if offset >= len(selected):
                     continue
                 target_view = target_dir / view
@@ -344,13 +380,15 @@ def _copy_images(seq_no: int, config: dict[str, Any], *, image_count: int) -> in
                 if len(log_summary["samples"]) < 3:
                     log_summary["samples"].append(str(target_path))
                 latest_index = current_index if latest_index is None else max(latest_index, current_index)
-            if image_interval_ms > 0:
-                time.sleep(image_interval_ms / 1000.0)
+        if image_interval_ms > 0:
+            time.sleep(image_interval_ms / 1000.0)
+
+    for surface_summary in log_summary["surfaces"]:
         surface_summary["index_start"] = start_index
         surface_summary["index_end"] = start_index + effective_count - 1
-        log_summary["surfaces"].append(surface_summary)
-    log_summary["image_count"] = actual_count or image_count
+    log_summary["image_count"] = effective_count
     log_summary["elapsed_seconds"] = round(time.time() - started_at, 2)
+
     record_path = (top_root / str(seq_no)) / "record.json"
     record_payload = {
         "seq_no": seq_no,
@@ -422,6 +460,12 @@ def _insert_defects(
         return
     frame_width = int(config.get("frame_width") or 16384)
     frame_height = int(config.get("frame_height") or 1024)
+    img_index_min = None
+    img_index_latest = None
+    if img_index_max is not None and int(img_index_max) > 0:
+        img_index_latest = int(img_index_max)
+        img_index_min = img_index_latest
+        img_index_max = img_index_latest
     settings = _resolved_settings(config)
     session = get_defect_session(settings)
     try:
@@ -439,8 +483,8 @@ def _insert_defects(
                 right = left + random.randint(20, 200)
                 bottom = top + random.randint(20, 200)
                 img_index = None
-                if img_index_max is not None and int(img_index_max) > 0:
-                    img_index = random.randint(1, int(img_index_max))
+                if img_index_max is not None:
+                    img_index = img_index_latest
                 session.execute(
                     text(
                         f"""
@@ -495,6 +539,8 @@ def _insert_defects(
         session.close()
     payload = {"seq_no": seq_no, "defect_count": defect_count, "surfaces": ["top", "bottom"]}
     if img_index_max is not None:
+        payload["image_index"] = img_index_latest
+        payload["img_index_min"] = img_index_min
         payload["img_index_max"] = img_index_max
     _append_log("生成缺陷", payload)
 
@@ -520,7 +566,7 @@ def _image_loop() -> None:
     while not _worker_stop.is_set():
         loop_start = time.time()
         config = _load_config()
-        if not config.get("enabled") or not config.get("auto_add_images"):
+        if not config.get("enabled"):
             _update_image_status("ready")
             time.sleep(1)
             continue
@@ -542,6 +588,7 @@ def _image_loop() -> None:
         steel_id = None
         try:
             seq_no = _next_seq(config)
+            _set_status(running=True, current_seq=seq_no, current_steel_id=None, current_image_index=None)
             latest_index = _copy_images(seq_no, config, image_count=image_count)
             steel_id = _insert_steel_record(seq_no, config)
             _append_log(
@@ -586,7 +633,7 @@ def _defect_loop() -> None:
     last_defect_ts = 0.0
     while not _worker_stop.is_set():
         config = _load_config()
-        if not config.get("enabled") or not config.get("auto_add_defects"):
+        if not config.get("enabled") or not config.get("generate_defects"):
             time.sleep(1)
             continue
         now = time.time()
@@ -628,8 +675,7 @@ def _ensure_worker() -> None:
 class ConfigPayload(BaseModel):
     enabled: bool | None = None
     record_interval_seconds: int | None = None
-    auto_add_images: bool | None = None
-    auto_add_defects: bool | None = None
+    generate_defects: bool | None = None
     defect_interval_seconds: int | None = None
     defects_per_interval: int | None = None
     length_range: list[int] | None = None
@@ -640,7 +686,6 @@ class ConfigPayload(BaseModel):
     source_seq: int | None = None
     views: list[str] | None = None
     line_key: str | None = None
-    generate_small_view: bool | None = None
     image_count_min: int | None = None
     image_count_max: int | None = None
     image_interval_ms: int | None = None
@@ -733,6 +778,7 @@ def start() -> dict[str, Any]:
         config["remaining_records"] = None
     _save_config(config)
     _ensure_worker()
+    _set_status(running=True, remaining_records=config.get("remaining_records"))
     _append_log("开始自动生成", {"total_records": config.get("total_records")})
     _update_image_status("running", message="图像生成中")
     return {"ok": True}

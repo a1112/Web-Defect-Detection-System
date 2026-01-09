@@ -546,6 +546,9 @@ class LineProcessManager:
                 selected = image_service
         if not selected:
             return None
+        if (selected.state or "").lower() == "ready":
+            if selected.message in (None, "", "系统就绪", "数据库正常", "图像路径正常", "数据刷新正常"):
+                return None
         return {
             "service": selected.name,
             "label": selected.label,

@@ -19,6 +19,7 @@ from app.server.api import admin
 from app.server.test_model import router as test_model_router
 from app.server.net_table import load_map_payload, save_map_payload, resolve_net_table_dir
 from app.server.utils.speed_test import make_speed_test_response
+from app.server.status_service import get_status_service
 
 logger = logging.getLogger(__name__)
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -248,18 +249,61 @@ def create_app(manager: ProcessManager) -> FastAPI:
 
     @router.get("/status")
     def config_status(line_key: str | None = None, kind: str | None = None) -> dict[str, Any]:
-        items = []
+        items: list[dict[str, Any]] = []
         try:
             items = manager.get_status_items(line_key=line_key, kind=kind)
         except Exception:
             logger.exception("Failed to build status items.")
+        control_item = None
+        try:
+            status_service = get_status_service()
+            control_services = [
+                item for item in status_service.list_services() if item.get("name") == "image_generate"
+            ]
+            control_item = {
+                "key": "__control__",
+                "name": "控制中心",
+                "kind": "center",
+                "host": "config_center",
+                "port": None,
+                "services": control_services,
+            }
+        except Exception:
+            logger.exception("Failed to build control center status.")
+        if control_item:
+            items = [control_item, *items]
         return {"items": items, "system_monitor": monitor.snapshot()}
 
     @router.get("/status/simple")
     def config_status_simple(line_key: str | None = None, kind: str | None = None) -> dict[str, Any]:
         item = None
         try:
-            item = manager.get_simple_status(line_key=line_key, kind=kind)
+            status_service = get_status_service()
+            control_services = [
+                item for item in status_service.list_services() if item.get("name") == "image_generate"
+            ]
+            control_simple = None
+            if control_services:
+                control_simple = {
+                    "state": control_services[0].get("state"),
+                    "message": control_services[0].get("message"),
+                    "service": control_services[0].get("name"),
+                    "label": control_services[0].get("label"),
+                    "priority": control_services[0].get("priority"),
+                    "data": control_services[0].get("data") or {},
+                    "updated_at": control_services[0].get("updated_at"),
+                }
+            api_simple = manager.get_simple_status(line_key=line_key, kind=kind)
+            if control_simple and str(control_simple.get("state") or "").lower() == "error":
+                item = control_simple
+                item["key"] = "__control__"
+            elif api_simple and str(api_simple.get("state") or "").lower() == "error":
+                item = api_simple
+            elif control_simple and str(control_simple.get("state") or "").lower() == "running":
+                item = control_simple
+                item["key"] = "__control__"
+            else:
+                item = api_simple or control_simple
         except Exception:
             logger.exception("Failed to build simple status.")
         return {"item": item, "system_monitor": monitor.snapshot()}
@@ -273,12 +317,19 @@ def create_app(manager: ProcessManager) -> FastAPI:
         limit: int = 200,
     ) -> dict[str, Any]:
         name = service or "all"
+        if line_key == "__control__":
+            status_service = get_status_service()
+            return status_service.get_logs(name, cursor=cursor, limit=limit)
         return manager.get_service_logs(line_key=line_key, kind=kind, service=name, cursor=cursor, limit=limit)
 
     @router.post("/status/{line_key}/{kind}/log/clear")
     def config_status_log_clear(line_key: str, kind: str, service: str | None = None) -> dict[str, Any]:
         name = service or "all"
-        manager.clear_service_logs(line_key=line_key, kind=kind, service=name)
+        if line_key == "__control__":
+            status_service = get_status_service()
+            status_service.clear_logs(name)
+        else:
+            manager.clear_service_logs(line_key=line_key, kind=kind, service=name)
         return {"ok": True}
 
     @router.put("/lines")
