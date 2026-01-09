@@ -3,6 +3,8 @@ from __future__ import annotations
 import logging
 import os
 import json
+import threading
+import time
 from pathlib import Path
 from datetime import datetime
 from typing import Any
@@ -96,6 +98,26 @@ class ProcessManager:
     def restart_all(self) -> int:  # pragma: no cover - interface
         raise NotImplementedError
 
+    def get_status_items(self, line_key: str | None = None, kind: str | None = None) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+    def get_simple_status(self, line_key: str | None = None, kind: str | None = None) -> dict[str, Any] | None:
+        raise NotImplementedError
+
+    def get_service_logs(
+        self,
+        *,
+        line_key: str,
+        kind: str,
+        service: str,
+        cursor: int = 0,
+        limit: int = 200,
+    ) -> dict[str, Any]:
+        raise NotImplementedError
+
+    def clear_service_logs(self, *, line_key: str, kind: str, service: str) -> None:
+        raise NotImplementedError
+
 
 class LineConfigPayload(BaseModel):
     lines: list[dict[str, Any]]
@@ -111,11 +133,83 @@ class ApiStatusPayload(BaseModel):
     online: bool | None = None
     latest_timestamp: datetime | None = None
     latest_age_seconds: int | None = None
+    services: list[dict[str, Any]] | None = None
+    logs: list[dict[str, Any]] | None = None
+    service_versions: dict[str, int] | None = None
+    service_log_cursor: dict[str, int] | None = None
+
+
+class SystemMonitor:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._metrics: dict[str, Any] = {
+            "cpu_percent": None,
+            "memory": None,
+            "disks": [],
+            "updated_at": None,
+            "disk_updated_at": None,
+        }
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+
+    def _loop(self) -> None:
+        last_disk = 0.0
+        while not self._stop.is_set():
+            now = time.time()
+            metrics: dict[str, Any] = {}
+            try:
+                import psutil  # type: ignore
+
+                metrics["cpu_percent"] = psutil.cpu_percent(interval=None)
+                vm = psutil.virtual_memory()
+                metrics["memory"] = {
+                    "total": vm.total,
+                    "used": vm.used,
+                    "percent": vm.percent,
+                }
+                if now - last_disk >= 120:
+                    disks = []
+                    for part in psutil.disk_partitions(all=False):
+                        try:
+                            usage = psutil.disk_usage(part.mountpoint)
+                        except Exception:
+                            continue
+                        disks.append(
+                            {
+                                "mountpoint": part.mountpoint,
+                                "total": usage.total,
+                                "used": usage.used,
+                                "percent": usage.percent,
+                            }
+                        )
+                    metrics["disks"] = disks
+                    metrics["disk_updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    last_disk = now
+            except Exception:
+                metrics["notes"] = ["psutil_not_available"]
+            metrics["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            with self._lock:
+                if metrics.get("cpu_percent") is not None:
+                    self._metrics["cpu_percent"] = metrics.get("cpu_percent")
+                if metrics.get("memory") is not None:
+                    self._metrics["memory"] = metrics.get("memory")
+                if metrics.get("disks") is not None:
+                    self._metrics["disks"] = metrics.get("disks", [])
+                if metrics.get("disk_updated_at"):
+                    self._metrics["disk_updated_at"] = metrics.get("disk_updated_at")
+                self._metrics["updated_at"] = metrics.get("updated_at")
+            self._stop.wait(5)
+
+    def snapshot(self) -> dict[str, Any]:
+        with self._lock:
+            return dict(self._metrics)
 
 
 def create_app(manager: ProcessManager) -> FastAPI:
     app = FastAPI(title="Config Center", version="0.1.0")
     _mount_ui(app)
+    monitor = SystemMonitor()
     router = APIRouter(prefix="/config")
 
     @router.get("/api_list")
@@ -151,6 +245,41 @@ def create_app(manager: ProcessManager) -> FastAPI:
             "views": payload.get("views") or {},
             "lines": payload.get("lines") or [],
         }
+
+    @router.get("/status")
+    def config_status(line_key: str | None = None, kind: str | None = None) -> dict[str, Any]:
+        items = []
+        try:
+            items = manager.get_status_items(line_key=line_key, kind=kind)
+        except Exception:
+            logger.exception("Failed to build status items.")
+        return {"items": items, "system_monitor": monitor.snapshot()}
+
+    @router.get("/status/simple")
+    def config_status_simple(line_key: str | None = None, kind: str | None = None) -> dict[str, Any]:
+        item = None
+        try:
+            item = manager.get_simple_status(line_key=line_key, kind=kind)
+        except Exception:
+            logger.exception("Failed to build simple status.")
+        return {"item": item, "system_monitor": monitor.snapshot()}
+
+    @router.get("/status/{line_key}/{kind}/log")
+    def config_status_log(
+        line_key: str,
+        kind: str,
+        service: str | None = None,
+        cursor: int = 0,
+        limit: int = 200,
+    ) -> dict[str, Any]:
+        name = service or "all"
+        return manager.get_service_logs(line_key=line_key, kind=kind, service=name, cursor=cursor, limit=limit)
+
+    @router.post("/status/{line_key}/{kind}/log/clear")
+    def config_status_log_clear(line_key: str, kind: str, service: str | None = None) -> dict[str, Any]:
+        name = service or "all"
+        manager.clear_service_logs(line_key=line_key, kind=kind, service=name)
+        return {"ok": True}
 
     @router.put("/lines")
     def save_lines(payload: LineConfigPayload) -> dict[str, Any]:

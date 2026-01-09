@@ -20,11 +20,12 @@ from sqlalchemy import func, text
 import requests
 
 from app.server import deps
-from app.server.api import defects, health, images, steels, meta, net, admin, cache
+from app.server.api import defects, health, images, steels, meta, net, admin, cache, status
 from app.server.api.dependencies import get_image_service
 from app.server.config.settings import ENV_CONFIG_KEY, ensure_config_file
 from app.server.rbac.manager import bootstrap_management
 from app.server.db.models.ncdplate import Steelrecord
+from app.server.status_service import get_status_service
 
 logger = logging.getLogger(__name__)
 
@@ -62,19 +63,55 @@ def _parse_int(value: str | None) -> int | None:
     return None
 
 
-def _collect_status_payload(line_key: str, line_name: str | None, line_kind: str | None) -> dict[str, object]:
+def _collect_status_payload(
+    line_key: str,
+    line_name: str | None,
+    line_kind: str | None,
+    last_versions: dict[str, int],
+    last_log_cursors: dict[str, int],
+) -> tuple[dict[str, object], dict[str, int], dict[str, int]]:
     latest_timestamp = None
     latest_age_seconds = None
     online = True
+    status_service = get_status_service()
     try:
         with deps.get_main_db() as session:
             latest = session.query(func.max(Steelrecord.detectTime)).scalar()
         if latest is not None:
             latest_timestamp = latest.isoformat()
             latest_age_seconds = max(0, int((datetime.utcnow() - latest).total_seconds()))
+        status_service.update_service(
+            "database",
+            state="ready",
+            message="数据库正常",
+            data={"latest_timestamp": latest_timestamp, "latest_age_seconds": latest_age_seconds},
+        )
     except Exception:
         logger.exception("Failed to query latest Steelrecord for status push.")
         online = False
+        status_service.update_service("database", state="error", message="数据库连接失败")
+    try:
+        settings = deps.get_settings()
+        top_root = Path(settings.images.top_root)
+        bottom_root = Path(settings.images.bottom_root)
+        missing = [str(path) for path in (top_root, bottom_root) if not path.exists()]
+        if missing:
+            status_service.update_service(
+                "image_path",
+                state="error",
+                message="图像路径缺失",
+                data={"missing": missing},
+            )
+        else:
+            status_service.update_service("image_path", state="ready", message="图像路径正常")
+    except Exception:
+        status_service.update_service("image_path", state="error", message="图像路径检查失败")
+    status_service.update_service(
+        "data_refresh",
+        state="ready",
+        message="数据刷新正常",
+        data={"latest_timestamp": latest_timestamp, "latest_age_seconds": latest_age_seconds},
+    )
     payload: dict[str, object] = {
         "key": line_key,
         "name": line_name,
@@ -86,14 +123,27 @@ def _collect_status_payload(line_key: str, line_name: str | None, line_kind: str
         "latest_timestamp": latest_timestamp,
         "latest_age_seconds": latest_age_seconds,
     }
-    return payload
+    services, next_versions, logs, next_cursors = status_service.collect_report(
+        last_versions, last_log_cursors, log_limit=200
+    )
+    if services:
+        payload["services"] = services
+    if logs:
+        payload["logs"] = logs
+    payload["service_versions"] = next_versions
+    payload["service_log_cursor"] = next_cursors
+    return payload, next_versions, next_cursors
 
 
 def _status_reporter(stop_event: Event, base_url: str, line_key: str, line_name: str | None, line_kind: str | None) -> None:
     interval = _parse_int(os.getenv(HEARTBEAT_INTERVAL_ENV)) or 15
     status_url = _resolve_status_url(base_url)
+    last_versions: dict[str, int] = {}
+    last_log_cursors: dict[str, int] = {}
     while not stop_event.is_set():
-        payload = _collect_status_payload(line_key, line_name, line_kind)
+        payload, last_versions, last_log_cursors = _collect_status_payload(
+            line_key, line_name, line_kind, last_versions, last_log_cursors
+        )
         try:
             requests.post(status_url, json=payload, timeout=5)
         except Exception:
@@ -182,6 +232,7 @@ app.include_router(defects.router)
 app.include_router(images.router)
 app.include_router(meta.router)
 app.include_router(net.router)
+app.include_router(status.router)
 app.include_router(admin.router, prefix="/api")
 app.include_router(admin.router, prefix="/config")
 app.include_router(cache.router)

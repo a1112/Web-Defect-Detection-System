@@ -18,6 +18,7 @@ from sqlalchemy import text
 from app.server.config.settings import ServerSettings, CURRENT_DIR
 from app.server.database import get_defect_session, get_main_session, _build_url
 from app.server.net_table import load_map_payload
+from app.server.status_service import get_status_service
 import os
 
 logger = logging.getLogger("test_model")
@@ -38,7 +39,6 @@ DEFAULT_CONFIG = {
     "record_interval_seconds": 5,
     "auto_add_images": False,
     "auto_add_defects": False,
-    "defect_per_record": 5,
     "defect_interval_seconds": 3,
     "defects_per_interval": 5,
     "length_range": [1000, 6000],
@@ -59,7 +59,8 @@ DEFAULT_CONFIG = {
 }
 
 _worker_lock = threading.Lock()
-_worker: threading.Thread | None = None
+_image_worker: threading.Thread | None = None
+_defect_worker: threading.Thread | None = None
 _worker_stop = threading.Event()
 _status_lock = threading.Lock()
 _status: dict[str, Any] = {
@@ -115,6 +116,23 @@ def _append_log(message: str, payload: dict[str, Any] | None = None) -> None:
         with LOG_PATH.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
     logger.info("%s | %s", message, payload or {})
+
+
+def _update_image_status(state: str, seq_no: int | None = None, index: int | None = None, message: str | None = None) -> None:
+    try:
+        data: dict[str, Any] = {}
+        if seq_no is not None:
+            data["seq_no"] = seq_no
+        if index is not None:
+            data["image_index"] = index
+        get_status_service().update_service(
+            "image_generate",
+            state=state,
+            message=message or ("系统就绪" if state == "ready" else "图像生成中"),
+            data=data,
+        )
+    except Exception:
+        return
 
 
 def _resolve_host_token(settings: ServerSettings) -> str:
@@ -191,6 +209,30 @@ def _image_roots(config: dict[str, Any] | None = None) -> tuple[Path, Path]:
     return _resolve(settings.images.top_root), _resolve(settings.images.bottom_root)
 
 
+def _resolve_image_index_max(seq_no: int, config: dict[str, Any]) -> int | None:
+    views = config.get("views") or ["2D"]
+    if not views:
+        views = ["2D"]
+    top_root, _ = _image_roots(config)
+    target_dir = top_root / str(seq_no)
+    if not target_dir.exists():
+        return None
+    max_index = None
+    for view in views:
+        view_dir = target_dir / view
+        if not view_dir.exists():
+            continue
+        for entry in view_dir.iterdir():
+            if not entry.is_file() or entry.suffix.lower() != ".jpg":
+                continue
+            try:
+                idx = int(entry.stem)
+            except ValueError:
+                continue
+            max_index = idx if max_index is None else max(max_index, idx)
+    return max_index
+
+
 def _resolve_last_seq(config: dict[str, Any] | None = None) -> int:
     settings = _resolved_settings(config)
     max_seq = 0
@@ -220,6 +262,7 @@ def _resolve_last_seq(config: dict[str, Any] | None = None) -> int:
 
 
 def _copy_images(seq_no: int, config: dict[str, Any], *, image_count: int) -> int | None:
+    started_at = time.time()
     source_seq = int(config.get("source_seq") or 1)
     views = config.get("views") or ["2D"]
     if not config.get("generate_small_view", True):
@@ -232,8 +275,11 @@ def _copy_images(seq_no: int, config: dict[str, Any], *, image_count: int) -> in
         "surfaces": [],
         "image_count": image_count,
         "samples": [],
+        "missing_views": [],
+        "image_interval_ms": image_interval_ms,
     }
     latest_index: int | None = None
+    actual_count: int | None = None
     for root in (top_root, bottom_root):
         surface = "top" if root == top_root else "bottom"
         surface_summary = {"surface": surface, "files": 0}
@@ -242,36 +288,79 @@ def _copy_images(seq_no: int, config: dict[str, Any], *, image_count: int) -> in
             raise FileNotFoundError(source_dir)
         target_dir = root / str(seq_no)
         target_dir.mkdir(parents=True, exist_ok=True)
+        view_files: dict[str, list[Path]] = {}
+        available_counts: list[int] = []
         for view in views:
             view_dir = source_dir / view
             if not view_dir.exists():
+                log_summary["missing_views"].append(view)
+                view_files[view] = []
                 continue
             files = sorted([p for p in view_dir.iterdir() if p.is_file() and p.suffix.lower() == ".jpg"])
             if not files:
+                log_summary["missing_views"].append(view)
+                view_files[view] = []
                 continue
-            if image_count <= 0:
-                image_count = 1
-            if image_count > len(files):
-                image_count = len(files)
+            view_files[view] = files
+            available_counts.append(len(files))
+        if not available_counts:
+            log_summary["surfaces"].append(surface_summary)
+            continue
+        effective_count = max(1, min(image_count, min(available_counts)))
+        actual_count = effective_count
+        selected_by_view: dict[str, list[Path]] = {}
+        for view, files in view_files.items():
+            if not files:
+                selected_by_view[view] = []
+                continue
             mid = len(files) // 2
-            start = max(0, mid - image_count // 2)
-            selected = files[start:start + image_count]
+            start = max(0, mid - effective_count // 2)
+            selected_by_view[view] = files[start:start + effective_count]
+
+        max_existing = 0
+        for view in views:
             target_view = target_dir / view
-            target_view.mkdir(parents=True, exist_ok=True)
-            for item in selected:
-                target_path = target_view / item.name
-                shutil.copy2(item, target_path)
+            if not target_view.exists():
+                continue
+            for existing in target_view.iterdir():
+                if not existing.is_file() or existing.suffix.lower() != ".jpg":
+                    continue
+                try:
+                    max_existing = max(max_existing, int(existing.stem))
+                except ValueError:
+                    continue
+        start_index = max_existing + 1
+        for offset in range(effective_count):
+            current_index = start_index + offset
+            for view in views:
+                selected = selected_by_view.get(view) or []
+                if offset >= len(selected):
+                    continue
+                target_view = target_dir / view
+                target_view.mkdir(parents=True, exist_ok=True)
+                target_path = target_view / f"{current_index}.jpg"
+                shutil.copy2(selected[offset], target_path)
                 surface_summary["files"] += 1
                 if len(log_summary["samples"]) < 3:
                     log_summary["samples"].append(str(target_path))
-                try:
-                    idx = int(item.stem)
-                    latest_index = idx if latest_index is None else max(latest_index, idx)
-                except ValueError:
-                    pass
-                if image_interval_ms > 0:
-                    time.sleep(image_interval_ms / 1000.0)
+                latest_index = current_index if latest_index is None else max(latest_index, current_index)
+            if image_interval_ms > 0:
+                time.sleep(image_interval_ms / 1000.0)
+        surface_summary["index_start"] = start_index
+        surface_summary["index_end"] = start_index + effective_count - 1
         log_summary["surfaces"].append(surface_summary)
+    log_summary["image_count"] = actual_count or image_count
+    log_summary["elapsed_seconds"] = round(time.time() - started_at, 2)
+    record_path = (top_root / str(seq_no)) / "record.json"
+    record_payload = {
+        "seq_no": seq_no,
+        "views": views,
+        "image_count": log_summary["image_count"],
+        "surfaces": log_summary["surfaces"],
+        "latest_index": latest_index,
+        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    record_path.write_text(json.dumps(record_payload, ensure_ascii=False, indent=2), encoding="utf-8")
     _append_log("添加图像", log_summary)
     return latest_index
 
@@ -280,7 +369,7 @@ def _insert_steel_record(seq_no: int, config: dict[str, Any]) -> str:
     length = random.randint(*config.get("length_range", [1000, 6000]))
     width = random.randint(*config.get("width_range", [800, 2000]))
     thickness = random.randint(*config.get("thickness_range", [5, 50]))
-    defect_num = int(config.get("defect_per_record") or 0)
+    defect_num = 0
     steel_id = f"TEST-{seq_no:06d}"
     detect_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     settings = _resolved_settings(config)
@@ -316,9 +405,20 @@ def _insert_steel_record(seq_no: int, config: dict[str, Any]) -> str:
     return steel_id
 
 
-def _insert_defects(seq_no: int, config: dict[str, Any], *, img_index: int | None = None, count: int | None = None) -> None:
-    defect_count = int(count if count is not None else (config.get("defect_per_record") or 0))
+def _insert_defects(
+    seq_no: int,
+    config: dict[str, Any],
+    *,
+    img_index_max: int | None = None,
+    count: int | None = None,
+) -> None:
+    max_per_interval = int(config.get("defects_per_interval") or 0)
+    target_max = int(count) if count is not None else max_per_interval
+    if target_max <= 0:
+        return
+    defect_count = random.randint(0, target_max)
     if defect_count <= 0:
+        _append_log("生成缺陷", {"seq_no": seq_no, "defect_count": 0})
         return
     frame_width = int(config.get("frame_width") or 16384)
     frame_height = int(config.get("frame_height") or 1024)
@@ -338,6 +438,9 @@ def _insert_defects(seq_no: int, config: dict[str, Any], *, img_index: int | Non
                 top = random.randint(0, max(0, frame_height - 200))
                 right = left + random.randint(20, 200)
                 bottom = top + random.randint(20, 200)
+                img_index = None
+                if img_index_max is not None and int(img_index_max) > 0:
+                    img_index = random.randint(1, int(img_index_max))
                 session.execute(
                     text(
                         f"""
@@ -390,10 +493,10 @@ def _insert_defects(seq_no: int, config: dict[str, Any], *, img_index: int | Non
         session.commit()
     finally:
         session.close()
-    _append_log(
-        "生成缺陷",
-        {"seq_no": seq_no, "defect_count": defect_count, "img_index": img_index},
-    )
+    payload = {"seq_no": seq_no, "defect_count": defect_count, "surfaces": ["top", "bottom"]}
+    if img_index_max is not None:
+        payload["img_index_max"] = img_index_max
+    _append_log("生成缺陷", payload)
 
 
 def _next_seq(config: dict[str, Any]) -> int:
@@ -413,13 +516,12 @@ def _get_status() -> dict[str, Any]:
         return dict(_status)
 
 
-def _auto_loop() -> None:
-    last_defect_ts = 0.0
-    last_defect_seq: int | None = None
-    last_defect_img_index: int | None = None
+def _image_loop() -> None:
     while not _worker_stop.is_set():
+        loop_start = time.time()
         config = _load_config()
-        if not config.get("enabled"):
+        if not config.get("enabled") or not config.get("auto_add_images"):
+            _update_image_status("ready")
             time.sleep(1)
             continue
         remaining_raw = config.get("remaining_records")
@@ -439,33 +541,32 @@ def _auto_loop() -> None:
         seq_no = None
         steel_id = None
         try:
-            if config.get("auto_add_images"):
-                seq_no = _next_seq(config)
-                latest_index = _copy_images(seq_no, config, image_count=image_count)
-                steel_id = _insert_steel_record(seq_no, config)
-                _append_log(
-                    "生成记录",
-                    {"seq_no": seq_no, "steel_id": steel_id, "image_count": image_count},
+            seq_no = _next_seq(config)
+            latest_index = _copy_images(seq_no, config, image_count=image_count)
+            steel_id = _insert_steel_record(seq_no, config)
+            _append_log(
+                "生成记录",
+                {"seq_no": seq_no, "steel_id": steel_id, "image_count": image_count},
+            )
+            _set_status(current_image_index=latest_index)
+            _update_image_status(
+                "running",
+                seq_no=seq_no,
+                index=latest_index,
+                message=f"图像生成中：{seq_no}-{latest_index}" if latest_index is not None else "图像生成中",
+            )
+            try:
+                get_status_service().append_log(
+                    "image_generate",
+                    level="info",
+                    message="生成图像",
+                    data={"seq_no": seq_no, "image_index": latest_index, "image_count": image_count},
                 )
-                last_defect_seq = seq_no
-                last_defect_img_index = latest_index
-                _set_status(current_image_index=latest_index)
-            if config.get("auto_add_defects"):
-                now = time.time()
-                interval = int(config.get("defect_interval_seconds") or 0)
-                if interval <= 0 or now - last_defect_ts >= interval:
-                    target_seq = (
-                        seq_no
-                        or last_defect_seq
-                        or int(config.get("last_seq") or config.get("source_seq") or 1)
-                    )
-                    defect_count = int(config.get("defects_per_interval") or config.get("defect_per_record") or 0)
-                    current_index = last_defect_img_index or _get_status().get("current_image_index")
-                    _insert_defects(target_seq, config, img_index=current_index, count=defect_count)
-                    last_defect_ts = now
+            except Exception:
+                pass
         except Exception as exc:
             _append_log("生成失败", {"error": str(exc)})
-            logger.exception("auto generate failed")
+            logger.exception("auto image generate failed")
         if remaining is not None and remaining > 0:
             config["remaining_records"] = remaining - 1
             _save_config(config)
@@ -475,17 +576,53 @@ def _auto_loop() -> None:
             current_steel_id=steel_id,
             remaining_records=config.get("remaining_records"),
         )
-        time.sleep(max(1, int(config.get("record_interval_seconds") or 5)))
+        interval = max(1, int(config.get("record_interval_seconds") or 5))
+        elapsed = time.time() - loop_start
+        sleep_seconds = max(0.0, interval - elapsed)
+        time.sleep(sleep_seconds)
+
+
+def _defect_loop() -> None:
+    last_defect_ts = 0.0
+    while not _worker_stop.is_set():
+        config = _load_config()
+        if not config.get("enabled") or not config.get("auto_add_defects"):
+            time.sleep(1)
+            continue
+        now = time.time()
+        interval = int(config.get("defect_interval_seconds") or 0)
+        if interval <= 0 or now - last_defect_ts >= interval:
+            status_snapshot = _get_status()
+            target_seq = int(
+                status_snapshot.get("current_seq")
+                or config.get("last_seq")
+                or config.get("source_seq")
+                or 1
+            )
+            current_index = status_snapshot.get("current_image_index")
+            if current_index is None:
+                current_index = _resolve_image_index_max(target_seq, config)
+            try:
+                _insert_defects(target_seq, config, img_index_max=current_index)
+                last_defect_ts = now
+            except Exception as exc:
+                _append_log("生成失败", {"error": str(exc)})
+                logger.exception("auto defect generate failed")
+        time.sleep(0.2)
 
 
 def _ensure_worker() -> None:
-    global _worker
+    global _image_worker, _defect_worker
     with _worker_lock:
-        if _worker and _worker.is_alive():
+        if _image_worker and _image_worker.is_alive() and _defect_worker and _defect_worker.is_alive():
             return
         _worker_stop.clear()
-        _worker = threading.Thread(target=_auto_loop, daemon=True)
-        _worker.start()
+        if not _image_worker or not _image_worker.is_alive():
+            _image_worker = threading.Thread(target=_image_loop, daemon=True)
+            _image_worker.start()
+        if not _defect_worker or not _defect_worker.is_alive():
+            _defect_worker = threading.Thread(target=_defect_loop, daemon=True)
+            _defect_worker.start()
 
 
 class ConfigPayload(BaseModel):
@@ -493,7 +630,6 @@ class ConfigPayload(BaseModel):
     record_interval_seconds: int | None = None
     auto_add_images: bool | None = None
     auto_add_defects: bool | None = None
-    defect_per_record: int | None = None
     defect_interval_seconds: int | None = None
     defects_per_interval: int | None = None
     length_range: list[int] | None = None
@@ -544,13 +680,22 @@ def status() -> dict[str, Any]:
     finally:
         main_session.close()
         defect_session.close()
+    current_seq = status_payload.get("current_seq")
+    if not current_seq:
+        current_seq = config.get("last_seq") or max_seq
+    current_index = status_payload.get("current_image_index")
+    if current_index is None and current_seq:
+        current_index = _resolve_image_index_max(int(current_seq), config)
     return {
         "enabled": True,
-        "running": bool(_worker and _worker.is_alive()),
-        "current_seq": status_payload.get("current_seq"),
+        "running": bool(
+            config.get("enabled")
+            and ((_image_worker and _image_worker.is_alive()) or (_defect_worker and _defect_worker.is_alive()))
+        ),
+        "current_seq": current_seq,
         "current_steel_id": status_payload.get("current_steel_id"),
-        "remaining_records": status_payload.get("remaining_records"),
-        "current_image_index": status_payload.get("current_image_index"),
+        "remaining_records": status_payload.get("remaining_records") if status_payload.get("remaining_records") is not None else config.get("remaining_records"),
+        "current_image_index": current_index,
         "steel_count": steel_count,
         "max_seq": max_seq,
         "defect_count": defect_count,
@@ -589,6 +734,7 @@ def start() -> dict[str, Any]:
     _save_config(config)
     _ensure_worker()
     _append_log("开始自动生成", {"total_records": config.get("total_records")})
+    _update_image_status("running", message="图像生成中")
     return {"ok": True}
 
 
@@ -601,6 +747,7 @@ def stop() -> dict[str, Any]:
     _worker_stop.set()
     _set_status(running=False)
     _append_log("停止自动生成")
+    _update_image_status("ready", message="生成完成")
     return {"ok": True}
 
 
@@ -640,13 +787,11 @@ def add_image_one() -> dict[str, Any]:
 def add_defects(payload: AddDefectsPayload) -> dict[str, Any]:
     _ensure_enabled()
     config = _load_config()
-    if payload.count is not None:
-        config["defect_per_record"] = payload.count
     seq_no = payload.seq_no or int(config.get("last_seq") or config.get("source_seq") or 1)
     current_index = _get_status().get("current_image_index")
-    _insert_defects(seq_no, config, img_index=current_index)
+    _insert_defects(seq_no, config, img_index_max=current_index, count=payload.count)
     _save_config(config)
-    _append_log("手动生成缺陷", {"seq_no": seq_no, "defect_count": config.get("defect_per_record")})
+    _append_log("手动生成缺陷", {"seq_no": seq_no, "defect_count": payload.count})
     return {"ok": True, "seq_no": seq_no}
 
 
@@ -713,3 +858,13 @@ def get_logs(limit: int = 200, cursor: int = 0) -> dict[str, Any]:
             items = [item for item in reversed(_log_items) if int(item.get("id") or 0) > cursor]
         latest_id = _log_items[0]["id"] if _log_items else cursor
     return {"items": items, "cursor": latest_id}
+
+
+@router.post("/logs/clear")
+def clear_logs() -> dict[str, Any]:
+    _ensure_enabled()
+    with _log_lock:
+        _log_items.clear()
+        LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        LOG_PATH.write_text("", encoding="utf-8")
+    return {"ok": True}

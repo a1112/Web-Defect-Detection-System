@@ -12,6 +12,7 @@ import re
 import json
 from typing import Any
 from threading import Lock
+from collections import deque
 
 import uvicorn
 
@@ -236,12 +237,37 @@ class ApiStatusEntry:
     pid: int | None = None
 
 
+@dataclass
+class ServiceStatusEntry:
+    name: str
+    label: str | None
+    priority: int
+    state: str
+    message: str | None
+    data: dict[str, Any]
+    updated_at: datetime
+    last_seen: datetime
+
+
+@dataclass
+class ServiceLogEntry:
+    service: str
+    log_id: int
+    time: str
+    level: str
+    message: str
+    data: dict[str, Any]
+
+
 class LineProcessManager:
     def __init__(self, *, reload: bool = False) -> None:
         self._lines: dict[str, list[LineProcess]] = {}
         self._api_status: dict[tuple[str, str], ApiStatusEntry] = {}
         self._status_lock = Lock()
         self._status_ttl_seconds = int(os.getenv("DEFECT_API_STATUS_TTL_SECONDS", "60"))
+        self._service_status: dict[tuple[str, str], dict[str, ServiceStatusEntry]] = {}
+        self._service_logs: dict[tuple[str, str], dict[str, deque[ServiceLogEntry]]] = {}
+        self._service_log_last_id: dict[tuple[str, str], dict[str, int]] = {}
         self._reload = reload
 
     def add_line(self, line: LineProcess) -> None:
@@ -329,6 +355,57 @@ class LineProcessManager:
         )
         with self._status_lock:
             self._api_status[(key, kind)] = entry
+            services = status.get("services") or []
+            if isinstance(services, list):
+                service_map = self._service_status.setdefault((key, kind), {})
+                for item in services:
+                    if not isinstance(item, dict):
+                        continue
+                    name = str(item.get("name") or "")
+                    if not name:
+                        continue
+                    updated_at = item.get("updated_at")
+                    if isinstance(updated_at, str):
+                        parsed = _parse_iso_timestamp(updated_at)
+                        updated_at_dt = parsed or datetime.utcnow()
+                    else:
+                        updated_at_dt = datetime.utcnow()
+                    service_map[name] = ServiceStatusEntry(
+                        name=name,
+                        label=item.get("label"),
+                        priority=int(item.get("priority") or 0),
+                        state=str(item.get("state") or "ready"),
+                        message=item.get("message"),
+                        data=item.get("data") if isinstance(item.get("data"), dict) else {},
+                        updated_at=updated_at_dt,
+                        last_seen=datetime.utcnow(),
+                    )
+            logs = status.get("logs") or []
+            if isinstance(logs, list):
+                log_map = self._service_logs.setdefault((key, kind), {})
+                last_id_map = self._service_log_last_id.setdefault((key, kind), {})
+                for item in logs:
+                    if not isinstance(item, dict):
+                        continue
+                    service = str(item.get("service") or "")
+                    if not service:
+                        continue
+                    log_id = _coerce_int(item.get("id")) or 0
+                    last_id = last_id_map.get(service, 0)
+                    if log_id <= last_id:
+                        continue
+                    last_id_map[service] = log_id
+                    buffer = log_map.setdefault(service, deque(maxlen=500))
+                    buffer.append(
+                        ServiceLogEntry(
+                            service=service,
+                            log_id=log_id,
+                            time=str(item.get("time") or ""),
+                            level=str(item.get("level") or "info"),
+                            message=str(item.get("message") or ""),
+                            data=item.get("data") if isinstance(item.get("data"), dict) else {},
+                        )
+                    )
 
     def _start_line(self, line: LineProcess) -> None:
         if line.process and line.process.is_alive():
@@ -381,6 +458,192 @@ class LineProcessManager:
             "latest_timestamp": latest_timestamp.isoformat() if latest_timestamp else None,
             "latest_age_seconds": latest_age_seconds,
         }
+
+    def get_status_items(self, line_key: str | None = None, kind: str | None = None) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        with self._status_lock:
+            for key, group in self._lines.items():
+                if line_key and key != line_key:
+                    continue
+                for proc in group:
+                    if kind and proc.kind != kind:
+                        continue
+                    status = self._api_status.get((key, proc.kind))
+                    latest_age_seconds = None
+                    latest_timestamp = None
+                    if status and status.latest_timestamp:
+                        latest_timestamp = status.latest_timestamp.isoformat()
+                        latest_age_seconds = max(
+                            0, int((datetime.utcnow() - status.latest_timestamp).total_seconds())
+                        )
+                    services = list(self._service_status.get((key, proc.kind), {}).values())
+                    services_sorted = sorted(
+                        services,
+                        key=lambda item: (item.priority, item.updated_at),
+                        reverse=True,
+                    )
+                    items.append(
+                        {
+                            "key": key,
+                            "name": proc.name,
+                            "kind": proc.kind,
+                            "host": proc.host,
+                            "port": proc.port,
+                            "pid": status.pid if status else None,
+                            "online": status.online if status else None,
+                            "latest_timestamp": latest_timestamp,
+                            "latest_age_seconds": latest_age_seconds,
+                            "services": [
+                                {
+                                    "name": item.name,
+                                    "label": item.label,
+                                    "priority": item.priority,
+                                    "state": item.state,
+                                    "message": item.message,
+                                    "data": item.data,
+                                    "updated_at": item.updated_at.strftime("%Y-%m-%d %H:%M:%S"),
+                                }
+                                for item in services_sorted
+                            ],
+                        }
+                    )
+        return items
+
+    def _select_simple(self, services: list[ServiceStatusEntry]) -> dict[str, Any] | None:
+        if not services:
+            return None
+
+        def _weight(state: str) -> int:
+            lowered = (state or "ready").lower()
+            if lowered == "error":
+                return 3
+            if lowered == "warning":
+                return 2
+            if lowered == "running":
+                return 1
+            return 0
+
+        def _pick(candidates: list[ServiceStatusEntry]) -> ServiceStatusEntry | None:
+            if not candidates:
+                return None
+            return max(
+                candidates,
+                key=lambda item: (
+                    item.priority,
+                    _weight(item.state),
+                    item.updated_at,
+                ),
+            )
+
+        errors = [item for item in services if (item.state or "").lower() == "error"]
+        selected = _pick(errors)
+        if not selected:
+            running = [item for item in services if (item.state or "").lower() == "running"]
+            selected = _pick(running)
+        if not selected:
+            image_service = next((item for item in services if item.name == "image_generate"), None)
+            if image_service and image_service.message and image_service.message != "系统就绪":
+                selected = image_service
+        if not selected:
+            return None
+        return {
+            "service": selected.name,
+            "label": selected.label,
+            "priority": selected.priority,
+            "state": selected.state,
+            "message": selected.message or "系统就绪",
+            "data": selected.data,
+            "updated_at": selected.updated_at.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
+    def get_simple_status(self, line_key: str | None = None, kind: str | None = None) -> dict[str, Any] | None:
+        with self._status_lock:
+            if line_key and kind:
+                services = list(self._service_status.get((line_key, kind), {}).values())
+                return self._select_simple(services)
+            if line_key:
+                for (key, view_kind), services_map in self._service_status.items():
+                    if key == line_key and (kind is None or view_kind == kind):
+                        result = self._select_simple(list(services_map.values()))
+                        if result:
+                            result["kind"] = view_kind
+                            return result
+                return None
+            for (_, view_kind), services_map in self._service_status.items():
+                result = self._select_simple(list(services_map.values()))
+                if result:
+                    result["kind"] = view_kind
+                    return result
+        return None
+
+    def get_service_logs(
+        self,
+        *,
+        line_key: str,
+        kind: str,
+        service: str,
+        cursor: int = 0,
+        limit: int = 200,
+    ) -> dict[str, Any]:
+        with self._status_lock:
+            log_map = self._service_logs.get((line_key, kind), {})
+            if service != "all":
+                buffer = log_map.get(service, deque())
+                items = [item for item in buffer if item.log_id > cursor]
+                if cursor <= 0:
+                    items = list(buffer)[-max(1, min(limit, 500)) :]
+                if limit > 0:
+                    items = items[-limit:]
+                next_cursor = items[-1].log_id if items else cursor
+                return {
+                    "items": [
+                        {
+                            "service": item.service,
+                            "id": item.log_id,
+                            "time": item.time,
+                            "level": item.level,
+                            "message": item.message,
+                            "data": item.data,
+                        }
+                        for item in items
+                    ],
+                    "cursor": next_cursor,
+                }
+            combined: list[ServiceLogEntry] = []
+            for buffer in log_map.values():
+                combined.extend([item for item in buffer if item.log_id > cursor])
+            combined.sort(key=lambda item: (item.time, item.log_id))
+            if limit > 0:
+                combined = combined[-limit:]
+            next_cursor = combined[-1].log_id if combined else cursor
+            return {
+                "items": [
+                    {
+                        "service": item.service,
+                        "id": item.log_id,
+                        "time": item.time,
+                        "level": item.level,
+                        "message": item.message,
+                        "data": item.data,
+                    }
+                    for item in combined
+                ],
+                "cursor": next_cursor,
+            }
+
+    def clear_service_logs(self, *, line_key: str, kind: str, service: str) -> None:
+        with self._status_lock:
+            log_map = self._service_logs.get((line_key, kind))
+            if not log_map:
+                return
+            if service == "all":
+                log_map.clear()
+                self._service_log_last_id.pop((line_key, kind), None)
+                return
+            log_map.pop(service, None)
+            last_map = self._service_log_last_id.get((line_key, kind))
+            if last_map:
+                last_map.pop(service, None)
 
 
 def _parse_iso_timestamp(value: str) -> datetime | None:

@@ -106,6 +106,27 @@ class ImageService:
         with self._cache_status_lock:
             return dict(self._cache_status)
 
+    def _update_cache_status_service(self, state: str, message: str, seq_no: int | None = None, surface: str | None = None) -> None:
+        try:
+            from app.server.status_service import get_status_service
+
+            payload = {"seq_no": seq_no, "surface": surface}
+            get_status_service().update_service(
+                "cache_generate",
+                state=state,
+                message=message,
+                data={k: v for k, v in payload.items() if v is not None},
+            )
+            if state == "running":
+                get_status_service().append_log(
+                    "cache_generate",
+                    level="info",
+                    message=message,
+                    data={k: v for k, v in payload.items() if v is not None},
+                )
+        except Exception:
+            return
+
     def begin_cache_task(self, state: str, message: str) -> None:
         with self._cache_status_lock:
             self._cache_task_state = state
@@ -115,6 +136,7 @@ class ImageService:
                 "seq_no": None,
                 "surface": None,
             }
+        self._update_cache_status_service("running", message)
 
     def end_cache_task(self) -> None:
         with self._cache_status_lock:
@@ -125,6 +147,7 @@ class ImageService:
                 "seq_no": None,
                 "surface": None,
             }
+        self._update_cache_status_service("ready", "就绪")
 
     def _begin_background_cache(self, seq_no: int, surface: str) -> None:
         with self._cache_status_lock:
@@ -138,6 +161,7 @@ class ImageService:
                 "seq_no": seq_no,
                 "surface": surface,
             }
+        self._update_cache_status_service("running", self._cache_status.get("message") or "", seq_no, surface)
 
     def _end_background_cache(self) -> None:
         with self._cache_status_lock:
@@ -151,6 +175,7 @@ class ImageService:
                     "seq_no": None,
                     "surface": None,
                 }
+                self._update_cache_status_service("ready", "就绪")
 
     # ------------------------------------------------------------------ #
     # Defect warmup helpers
@@ -171,10 +196,33 @@ class ImageService:
         ):
             return
         try:
+            from app.server.status_service import get_status_service
+
+            get_status_service().update_service(
+                "data_warmup",
+                state="running",
+                message=f"缺陷预热 {seq_no}",
+                data={"seq_no": seq_no, "surface": surface},
+            )
+            get_status_service().append_log(
+                "data_warmup",
+                level="info",
+                message="开始预热",
+                data={"seq_no": seq_no, "surface": surface},
+            )
+        except Exception:
+            pass
+        try:
             # surface=None 时同时预热 top/bottom，两侧的缺陷记录都会返回
             resp = self.defect_service.defects_by_seq(seq_no, surface=surface)
         except Exception:
             logger.exception("warmup defects: load defect list failed seq=%s surface=%s", seq_no, surface)
+            try:
+                from app.server.status_service import get_status_service
+
+                get_status_service().update_service("data_warmup", state="error", message="缺陷预热失败")
+            except Exception:
+                pass
             return
 
         default_expand = self.disk_cache.defect_expand
@@ -199,6 +247,18 @@ class ImageService:
                     item.surface,
                     item.defect_id,
                 )
+        try:
+            from app.server.status_service import get_status_service
+
+            get_status_service().update_service("data_warmup", state="ready", message="缺陷预热完成")
+            get_status_service().append_log(
+                "data_warmup",
+                level="info",
+                message="预热完成",
+                data={"seq_no": seq_no, "surface": surface},
+            )
+        except Exception:
+            pass
 
     def read_disk_cache_meta(self, seq_no: int) -> dict[str, dict]:
         """
