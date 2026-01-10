@@ -11,3 +11,5 @@
 /logs
 /node_modules/
 /configs/current/
+*.log
+/error_log

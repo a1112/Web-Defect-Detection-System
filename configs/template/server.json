@@ -35,5 +35,6 @@
     "disk_precache_enabled": true,
     "disk_precache_levels": 4,
     "disk_precache_workers": 2
-  }
+  },
+  "config_center_url": "http://127.0.0.1:8119"
 }

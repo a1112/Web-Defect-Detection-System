@@ -10,7 +10,7 @@ from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.middleware.base import BaseHTTPMiddleware

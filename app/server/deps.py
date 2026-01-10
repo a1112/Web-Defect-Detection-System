@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from functools import lru_cache
 import os
 from pathlib import Path
@@ -67,6 +68,16 @@ def get_main_db() -> Generator[Session, None, None]:
         session.close()
 
 
+@contextmanager
+def get_main_db_context() -> Generator[Session, None, None]:
+    gen = get_main_db()
+    session = next(gen)
+    try:
+        yield session
+    finally:
+        gen.close()
+
+
 def get_defect_db() -> Generator[Session, None, None]:
     settings = get_settings()
     session = get_defect_session(settings)
@@ -74,6 +85,16 @@ def get_defect_db() -> Generator[Session, None, None]:
         yield session
     finally:
         session.close()
+
+
+@contextmanager
+def get_defect_db_context() -> Generator[Session, None, None]:
+    gen = get_defect_db()
+    session = next(gen)
+    try:
+        yield session
+    finally:
+        gen.close()
 
 
 def get_management_db() -> Generator[Session, None, None]:
@@ -102,3 +123,13 @@ def get_management_db() -> Generator[Session, None, None]:
         yield session
     finally:
         session.close()
+
+
+@contextmanager
+def get_management_db_context() -> Generator[Session, None, None]:
+    gen = get_management_db()
+    session = next(gen)
+    try:
+        yield session
+    finally:
+        gen.close()

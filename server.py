@@ -4,7 +4,10 @@ import argparse
 import logging
 import logging.handlers
 import os
+import sys
+import subprocess
 import multiprocessing as mp
+import psutil # type: ignore
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -668,8 +671,37 @@ def _coerce_int(value: Any) -> int | None:
     return None
 
 
+def _ensure_nginx_running() -> None:
+    if sys.platform != "win32":
+        return
+
+    nginx_conf_path = REPO_ROOT.parent / "plugins" / "platforms" / "windows" / "nginx" / "conf" / "nginx.conf"
+    if not nginx_conf_path.exists():
+        logger.error("Nginx configuration file not found: %s", nginx_conf_path)
+        raise FileNotFoundError(f"Nginx configuration file not found: {nginx_conf_path}")
+
+    nginx_running = False
+    for proc in psutil.process_iter(['name']):
+        if proc.info['name'] == 'nginx.exe':
+            nginx_running = True
+            break
+
+    if not nginx_running:
+        logger.info("Nginx is not running. Attempting to start Nginx using run_nginx.bat...")
+        run_nginx_bat_path = REPO_ROOT.parent / "run_nginx.bat"
+        try:
+            # 使用 start 命令在新的窗口中运行批处理文件，避免阻塞
+            subprocess.Popen(f'start "" "{run_nginx_bat_path}"', shell=True)
+            logger.info("Executed run_nginx.bat. Please verify Nginx started correctly.")
+        except Exception as e:
+            logger.error("Failed to start Nginx using run_nginx.bat: %s", e)
+            raise SystemExit(1)
+
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
+    _ensure_nginx_running()
     parser = argparse.ArgumentParser(description="Net table multi-line server launcher")
     parser.add_argument(
         "--test_data",

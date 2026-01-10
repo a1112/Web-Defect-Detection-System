@@ -21,7 +21,7 @@ def healthcheck():
     db_connected = False
     latency_ms: float | None = None
     try:
-        with deps.get_main_db() as session:
+        with deps.get_main_db_context() as session:
             session.execute(text("SELECT 1"))
             db_connected = True
     except Exception:  # pragma: no cover - 健康检查中容错

@@ -140,6 +140,10 @@ class ServerSettings(BaseModel):
     database: DatabaseSettings
     images: ImageSettings
     cache: "CacheSettings"
+    config_center_url: Optional[str] = Field(
+        default=None,
+        description="Config center base URL used for status heartbeat when DEFECT_CONFIG_CENTER_URL is unset.",
+    )
     test_mode: bool = Field(default=False, description="Enable local TestData-backed mode (SQLite + local images).")
     testdata_dir: Optional[Path] = Field(default=None, description="Path to TestData directory used in test mode.")
 

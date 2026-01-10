@@ -321,6 +321,34 @@ def _get_resource_metrics() -> dict[str, Any]:
     return metrics
 
 
+def _get_process_metrics(
+    sample_seconds: float | None = 0.1, process: Any | None = None
+) -> dict[str, Any]:
+    metrics: dict[str, Any] = {
+        "cpu_percent": None,
+        "memory_percent": None,
+        "memory_rss_bytes": None,
+        "memory_vms_bytes": None,
+        "notes": [],
+    }
+    try:
+        import psutil  # type: ignore
+
+        proc = process or psutil.Process(os.getpid())
+        if sample_seconds is None:
+            metrics["cpu_percent"] = proc.cpu_percent(interval=None)
+        else:
+            metrics["cpu_percent"] = proc.cpu_percent(interval=sample_seconds)
+        mem = proc.memory_info()
+        metrics["memory_percent"] = proc.memory_percent()
+        metrics["memory_rss_bytes"] = mem.rss
+        metrics["memory_vms_bytes"] = mem.vms
+        return metrics
+    except Exception:
+        metrics["notes"].append("psutil_not_available")
+    return metrics
+
+
 def _get_disk_usage() -> list[dict[str, Any]]:
     try:
         import psutil  # type: ignore
@@ -580,8 +608,8 @@ def get_system_info():
     lines = [str(item.get("name") or item.get("key") or "") for item in (config.get("lines") or [])]
     lines = [name for name in lines if name]
 
-    main_ok, main_error = _check_database(deps.get_main_db)
-    manage_ok, manage_error = _check_database(deps.get_management_db)
+    main_ok, main_error = _check_database(deps.get_main_db_context)
+    manage_ok, manage_error = _check_database(deps.get_management_db_context)
 
     db_settings = settings.database
     port_value = None if db_settings.drive == "sqlite" else db_settings.resolved_port
@@ -613,6 +641,7 @@ def get_system_info():
             "python_executable": sys.executable,
         },
         "resources": _get_resource_metrics(),
+        "service_resources": _get_process_metrics(),
         "disks": _get_disk_usage(),
         "network_interfaces": _get_network_interfaces(),
     }
@@ -1002,15 +1031,22 @@ async def ws_system_metrics(websocket: WebSocket):
     interval = 1.0
     prev_counters: dict[str, Any] | None = None
     prev_ts: float | None = None
+    process = None
+    try:
+        import psutil  # type: ignore
+
+        process = psutil.Process(os.getpid())
+        process.cpu_percent(interval=None)
+    except Exception:
+        process = None
     try:
         while True:
             now_ts = time.time()
-            try:
-                import psutil  # type: ignore
-            except Exception:
+            if process is None:
                 payload = {
                     "timestamp": datetime.utcnow().isoformat(),
                     "resources": _get_resource_metrics(),
+                    "service_resources": _get_process_metrics(sample_seconds=None),
                     "disks": _get_disk_usage(),
                     "network_interfaces": [],
                 }
@@ -1042,6 +1078,7 @@ async def ws_system_metrics(websocket: WebSocket):
             payload = {
                 "timestamp": datetime.utcnow().isoformat(),
                 "resources": metrics,
+                "service_resources": _get_process_metrics(sample_seconds=None, process=process),
                 "disks": _get_disk_usage(),
                 "network_interfaces": interfaces,
             }

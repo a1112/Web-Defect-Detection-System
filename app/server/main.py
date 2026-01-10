@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 
 API_VERSION = "0.1.0"
 CONFIG_CENTER_URL_ENV = "DEFECT_CONFIG_CENTER_URL"
+DEFAULT_CONFIG_CENTER_URL = "http://127.0.0.1:8119"
 LINE_KEY_ENV = "DEFECT_LINE_KEY"
 LINE_NAME_ENV = "DEFECT_LINE_NAME"
 LINE_KIND_ENV = "DEFECT_LINE_KIND"
@@ -75,7 +76,7 @@ def _collect_status_payload(
     online = True
     status_service = get_status_service()
     try:
-        with deps.get_main_db() as session:
+        with deps.get_main_db_context() as session:
             latest = session.query(func.max(Steelrecord.detectTime)).scalar()
         if latest is not None:
             latest_timestamp = latest.isoformat()
@@ -155,14 +156,14 @@ def _status_reporter(stop_event: Event, base_url: str, line_key: str, line_name:
 async def app_lifespan(app: FastAPI):
     """应用生命周期管理：启动时预热数据库连接。"""
     try:
-        with deps.get_main_db() as session:
+        with deps.get_main_db_context() as session:
             session.execute(text("SELECT 1"))
     except Exception:
         logger.exception("Failed to warm up main database connection.")
 
     try:
         settings = deps.get_settings()
-        with deps.get_management_db() as session:
+        with deps.get_management_db_context() as session:
             bootstrap_management(settings, session)
     except Exception:
         logger.exception("Failed to initialize management database.")
@@ -174,6 +175,13 @@ async def app_lifespan(app: FastAPI):
     status_stop: Event | None = None
     status_thread: Thread | None = None
     config_center_url = os.getenv(CONFIG_CENTER_URL_ENV, "").strip()
+    if not config_center_url:
+        try:
+            config_center_url = (deps.get_settings().config_center_url or "").strip()
+        except Exception:
+            config_center_url = ""
+    if not config_center_url:
+        config_center_url = DEFAULT_CONFIG_CENTER_URL
     line_key = os.getenv(LINE_KEY_ENV) or os.getenv(LINE_NAME_ENV)
     line_name = os.getenv(LINE_NAME_ENV)
     line_kind = os.getenv(LINE_KIND_ENV)

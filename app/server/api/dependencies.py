@@ -9,12 +9,12 @@ from app.server.services.steel_service import SteelService
 
 
 def get_steel_service() -> SteelService:
-    return SteelService(core_deps.get_main_db)
+    return SteelService(core_deps.get_main_db_context)
 
 
 @lru_cache()
 def get_defect_service() -> DefectService:
-    return DefectService(core_deps.get_defect_db)
+    return DefectService(core_deps.get_defect_db_context)
 
 
 @lru_cache()
