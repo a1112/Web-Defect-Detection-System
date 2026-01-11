@@ -175,7 +175,8 @@ class LogSettings(BaseModel):
 class ServerSettings(BaseModel):
     database: DatabaseSettings
     images: ImageSettings
-    cache: "CacheSettings"
+    memory_cache: "MemoryCacheSettings"
+    disk_cache: "DiskCacheSettings"
     log: LogSettings = Field(default_factory=LogSettings)
     config_center_url: Optional[str] = Field(
         default=None,
@@ -206,6 +207,36 @@ class ServerSettings(BaseModel):
         if base_path.exists() and base_path.resolve() != config_path.resolve():
             base_payload = json.loads(base_path.read_text(encoding="utf-8"))
             payload = _deep_merge(base_payload, payload)
+        legacy_cache = payload.pop("cache", None)
+        if isinstance(legacy_cache, dict):
+            memory_keys = {
+                "max_frames",
+                "max_tiles",
+                "max_mosaics",
+                "max_defect_crops",
+                "ttl_seconds",
+            }
+            disk_keys = {
+                "defect_cache_enabled",
+                "defect_cache_expand",
+                "disk_cache_enabled",
+                "disk_cache_max_records",
+                "disk_cache_scan_interval_seconds",
+                "disk_cache_cleanup_interval_seconds",
+                "disk_precache_enabled",
+                "disk_precache_levels",
+                "disk_precache_workers",
+            }
+            payload.setdefault("memory_cache", {})
+            payload.setdefault("disk_cache", {})
+            if isinstance(payload.get("memory_cache"), dict):
+                for key in memory_keys:
+                    if key in legacy_cache and key not in payload["memory_cache"]:
+                        payload["memory_cache"][key] = legacy_cache[key]
+            if isinstance(payload.get("disk_cache"), dict):
+                for key in disk_keys:
+                    if key in legacy_cache and key not in payload["disk_cache"]:
+                        payload["disk_cache"][key] = legacy_cache[key]
         return cls(**payload)
 
     @staticmethod
@@ -261,21 +292,24 @@ def ensure_config_file(explicit_path: str | Path | None = None) -> Path:
     )
 
 
-class CacheSettings(BaseModel):
+class MemoryCacheSettings(BaseModel):
     max_frames: int = Field(default=64, ge=-1)
     max_tiles: int = Field(default=256, ge=-1)
     max_mosaics: int = Field(default=8, ge=-1)
     max_defect_crops: int = Field(default=256, ge=-1)
     ttl_seconds: int = Field(default=120, ge=1)
+
+
+class DiskCacheSettings(BaseModel):
     defect_cache_enabled: bool = Field(
         default=True,
-        description="是否启用缺陷裁剪结果的磁盘缓存（依赖 disk_cache_enabled 一并生效）。",
+        description="?????????????????? disk_cache_enabled ??????",
     )
     defect_cache_expand: int = Field(
         default=100,
         ge=0,
         le=512,
-        description="缺陷缓存最大裁剪保留：缺陷裁剪时的默认扩展像素。",
+        description="????????????????????????",
     )
     disk_cache_enabled: bool = Field(default=False)
     disk_cache_max_records: int = Field(default=20000, ge=1)
@@ -284,6 +318,7 @@ class CacheSettings(BaseModel):
     disk_precache_enabled: bool = Field(default=False)
     disk_precache_levels: int = Field(default=1, ge=1)
     disk_precache_workers: int = Field(default=2, ge=1)
+
 
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:

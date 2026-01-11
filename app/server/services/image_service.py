@@ -36,41 +36,42 @@ class ImageService:
         self.defect_service = defect_service
         self.test_mode = bool(getattr(settings, "test_mode", False))
         image_settings = settings.images
-        cache_settings = settings.cache
+        memory_cache = settings.memory_cache
+        disk_cache = settings.disk_cache
         self.mode = image_settings.mode
-        ttl_seconds = cache_settings.ttl_seconds
+        ttl_seconds = memory_cache.ttl_seconds
         def _resolve_limit(value: int) -> int:
             if value < 0:
                 return 10**9
             return value
         self.frame_cache = TtlLruCache(
-            max_items=_resolve_limit(cache_settings.max_frames),
+            max_items=_resolve_limit(memory_cache.max_frames),
             ttl_seconds=ttl_seconds,
         )
         tile_ttl_seconds = ttl_seconds
         if image_settings.tile_prefetch_enabled:
             tile_ttl_seconds = max(tile_ttl_seconds, int(image_settings.tile_prefetch_ttl_seconds))
         self.tile_cache = TtlLruCache(
-            max_items=_resolve_limit(cache_settings.max_tiles),
+            max_items=_resolve_limit(memory_cache.max_tiles),
             ttl_seconds=tile_ttl_seconds,
         )
         self.mosaic_cache = TtlLruCache(
-            max_items=_resolve_limit(cache_settings.max_mosaics),
+            max_items=_resolve_limit(memory_cache.max_mosaics),
             ttl_seconds=ttl_seconds,
         )
         self.defect_crop_cache = TtlLruCache(
-            max_items=_resolve_limit(cache_settings.max_defect_crops),
+            max_items=_resolve_limit(memory_cache.max_defect_crops),
             ttl_seconds=ttl_seconds,
         )
 
         self.disk_cache = DiskImageCache(
-            enabled=cache_settings.disk_cache_enabled,
+            enabled=disk_cache.disk_cache_enabled,
             read_only=self.test_mode,
             flat_layout=False,
-            max_tiles=cache_settings.disk_cache_max_records,
-            max_defects=cache_settings.disk_cache_max_records,
+            max_tiles=disk_cache.disk_cache_max_records,
+            max_defects=disk_cache.disk_cache_max_records,
             # 缺陷缓存最大裁剪保留来自配置
-            defect_expand=int(getattr(cache_settings, "defect_cache_expand", 100) or 100),
+            defect_expand=int(getattr(disk_cache, "defect_cache_expand", 100) or 100),
             tile_size=image_settings.frame_height,
             frame_width=image_settings.frame_width,
             frame_height=image_settings.frame_height,
@@ -171,7 +172,7 @@ class ImageService:
         try:
             from app.server.status_service import get_status_service
 
-            cache_settings = self.settings.cache
+            cache_settings = self.settings.disk_cache
             if surfaces:
                 surfaces = sorted(set(surfaces))
             cache_dir = None
@@ -270,7 +271,7 @@ class ImageService:
           以便后续前端请求时尽量不再经过 Pillow/OpenCV 的在线裁剪。
         """
         images = self.settings.images
-        cache_settings = self.settings.cache
+        cache_settings = self.settings.disk_cache
         if not getattr(cache_settings, "disk_cache_enabled", False) or not getattr(
             cache_settings,
             "defect_cache_enabled",
@@ -360,9 +361,9 @@ class ImageService:
         """
         主动触发指定钢板的磁盘缓存预热（瓦片 + 缺陷小图）。
         """
-        if not self.settings.cache.disk_cache_enabled:
+        if not self.settings.disk_cache.disk_cache_enabled:
             return
-        precache_levels = levels if levels is not None else self.settings.cache.disk_precache_levels
+        precache_levels = levels if levels is not None else self.settings.disk_cache.disk_precache_levels
         self._precache_seq_pair(seq_no, precache_levels=precache_levels)
 
     def enqueue_cache_delete(self, seqs: list[int]) -> None:
@@ -574,7 +575,7 @@ class ImageService:
             return None
 
     def _update_cache_records(self, seq_no: int, *, view_dir: str) -> None:
-        if not self.settings.cache.disk_cache_enabled:
+        if not self.settings.disk_cache.disk_cache_enabled:
             return
         line_key = os.getenv("DEFECT_LINE_KEY") or os.getenv("DEFECT_LINE_NAME") or "default"
         try:
@@ -612,7 +613,7 @@ class ImageService:
                         "tile_size": int(tile.get("tile_size") or 0),
                         "defect_expand": int(defects.get("expand") or 0),
                         "defect_cache_enabled": bool(defects.get("enabled", True)),
-                        "disk_cache_enabled": bool(self.settings.cache.disk_cache_enabled),
+                        "disk_cache_enabled": bool(self.settings.disk_cache.disk_cache_enabled),
                         "meta_json": json.dumps(meta, ensure_ascii=False),
                     }
                     if existing is None:
@@ -691,7 +692,7 @@ class ImageService:
                 self._remove_cache_seq(seq_no)
             self._precache_seq_pair(
                 seq_no,
-                precache_levels=self.settings.cache.disk_precache_levels,
+                precache_levels=self.settings.disk_cache.disk_precache_levels,
                 force=force,
                 task_info=task_info,
                 message=f"缓存重建 {seq_no}",
@@ -711,10 +712,11 @@ class ImageService:
         if max_seq is None:
             self._set_cache_status(state="ready", message="等待缓存任务", task=None)
             return
-        start_seq = max(1, int(max_seq) - 199 + 1)
+        window_size = 100
+        window_start = max(1, int(max_seq) - window_size + 1)
         latest_cached = self._get_latest_cached_seq(view_dir=view_dir)
-        if latest_cached is None or latest_cached < start_seq:
-            seq_list = list(range(start_seq, int(max_seq) + 1))
+        if latest_cached is None:
+            start_seq = window_start
         elif latest_cached >= int(max_seq):
             task_info = {
                 "type": "auto",
@@ -730,7 +732,9 @@ class ImageService:
             )
             return
         else:
-            seq_list = list(range(int(latest_cached) + 1, int(max_seq) + 1))
+            start_seq = max(window_start, int(latest_cached) + 1)
+
+        seq_list = list(range(start_seq, int(max_seq) + 1))
 
         if not seq_list:
             self._set_cache_status(state="ready", message="等待缓存任务", task=None)
@@ -766,7 +770,7 @@ class ImageService:
 
     def start_background_workers(self) -> None:
         image_settings = self.settings.images
-        cache_settings = self.settings.cache
+        cache_settings = self.settings.disk_cache
         self._start_tile_prefetch_threads()
         self._start_image_watch_thread()
         if not cache_settings.disk_cache_enabled or self.disk_cache.read_only:
@@ -794,7 +798,7 @@ class ImageService:
             self._tile_prefetch.stop()
             self._tile_prefetch_started = False
         self._image_watch_stop.set()
-        if not self.settings.cache.disk_cache_enabled:
+        if not self.settings.disk_cache.disk_cache_enabled:
             return
         self._disk_cache_stop.set()
         logger.info("disk-cache worker threads stop requested")
@@ -1681,7 +1685,7 @@ class ImageService:
                 self._cache_task_queue.task_done()
 
     def _disk_cache_precache_loop(self) -> None:
-        settings = self.settings.cache
+        settings = self.settings.disk_cache
         scan_interval = settings.disk_cache_scan_interval_seconds
         precache_levels = settings.disk_precache_levels
 
@@ -1724,7 +1728,7 @@ class ImageService:
             self._disk_cache_stop.wait(scan_interval)
 
     def _disk_cache_cleanup_loop(self) -> None:
-        settings = self.settings.cache
+        settings = self.settings.disk_cache
         interval = settings.disk_cache_cleanup_interval_seconds
         view_dir = self.settings.images.default_view
 

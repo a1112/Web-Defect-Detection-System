@@ -94,8 +94,8 @@ def api_defects(
     # NOTE: 传统模式缺陷分析界面通常会在获取缺陷列表后立即请求各缺陷小图。
     # 这里在后台线程中预热该板所有缺陷小图，尽量保证前端随后请求
     # /api/images/defect/{defect_id} 时直接命中磁盘缓存，而不是在线裁剪。
-    if getattr(image_service.settings.cache, "disk_cache_enabled", False) and getattr(
-        image_service.settings.cache, "defect_cache_enabled", True
+    if getattr(image_service.settings.disk_cache, "disk_cache_enabled", False) and getattr(
+        image_service.settings.disk_cache, "defect_cache_enabled", True
     ):
         threading.Thread(
             target=image_service.warmup_defects_for_seq,

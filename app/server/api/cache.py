@@ -151,15 +151,14 @@ class CacheStatusResponse(BaseModel):
     line_name: Optional[str] = None
     line_kind: Optional[str] = None
     pid: Optional[int] = None
-    cache_root_top: Optional[str] = None
-    cache_root_bottom: Optional[str] = None
     worker_per_surface: Optional[int] = None
     paused: bool = False
     task: Optional[dict] = None
 
 
 class CacheSettingsPayload(BaseModel):
-    cache: dict[str, object]
+    memory_cache: dict[str, object]
+    disk_cache: dict[str, object]
 
 
 class CacheDeleteRequest(BaseModel):
@@ -268,16 +267,16 @@ def list_cache_records(
             .all()
         )
     cache_map: dict[int, dict[str, CacheRecord]] = {}
+    disk_cache = image_service.settings.disk_cache
     for row in cache_rows:
         cache_map.setdefault(int(row.seq_no), {})[row.surface] = row
 
-    cache_settings = image_service.settings.cache
-    max_records = int(cache_settings.disk_cache_max_records or 0)
+    max_records = int(disk_cache.disk_cache_max_records or 0)
     cache_range_min = None
     if max_records > 0 and max_seq:
         cache_range_min = int(max_seq) - max_records + 1
     expected_tile_max_level = image_service.disk_cache.max_level()
-    expected_defect_expand = int(getattr(cache_settings, "defect_cache_expand", 0) or 0)
+    expected_defect_expand = int(getattr(disk_cache, "defect_cache_expand", 0) or 0)
     view_dir = image_service.settings.images.default_view
     items: list[CacheRecordPayload] = []
     for record in records:
@@ -312,7 +311,7 @@ def list_cache_records(
                     tile_size=row.tile_size if row else None,
                     defect_expand=row.defect_expand if row else None,
                     defect_cache_enabled=row.defect_cache_enabled if row else None,
-                    disk_cache_enabled=row.disk_cache_enabled if row else bool(cache_settings.disk_cache_enabled),
+                    disk_cache_enabled=row.disk_cache_enabled if row else bool(disk_cache.disk_cache_enabled),
                     updated_at=row.updated_at if row else None,
                 )
             )
@@ -352,7 +351,7 @@ def scan_cache_records(
 ):
     line_key = _get_line_key()
     view = image_service.settings.images.default_view
-    disk_cache_enabled = bool(image_service.settings.cache.disk_cache_enabled)
+    disk_cache_enabled = bool(image_service.settings.disk_cache.disk_cache_enabled)
 
     seqs: list[int] = []
     if payload.seq_no is not None:
@@ -419,10 +418,6 @@ async def cache_status_ws(websocket: WebSocket):
 @router.get("/cache/status", response_model=CacheStatusResponse)
 def get_cache_status(image_service: ImageService = Depends(get_image_service)):
     status = image_service.get_cache_status()
-    image_settings = image_service.settings.images
-    cache_settings = image_service.settings.cache
-    top_root = image_settings.disk_cache_top_root or image_settings.top_root
-    bottom_root = image_settings.disk_cache_bottom_root or image_settings.bottom_root
     return CacheStatusResponse(
         state=str(status.get("state") or "ready"),
         message=str(status.get("message") or "就绪"),
@@ -433,8 +428,6 @@ def get_cache_status(image_service: ImageService = Depends(get_image_service)):
         line_name=os.getenv(LINE_NAME_ENV),
         line_kind=os.getenv("DEFECT_LINE_KIND") or "default",
         pid=os.getpid(),
-        cache_root_top=str(top_root) if top_root else None,
-        cache_root_bottom=str(bottom_root) if bottom_root else None,
         worker_per_surface=1,
         paused=bool(status.get("paused") or False),
         task=status.get("task"),
@@ -455,7 +448,10 @@ def resume_cache(image_service: ImageService = Depends(get_image_service)):
 
 @router.get("/cache/settings", response_model=CacheSettingsPayload)
 def get_cache_settings(image_service: ImageService = Depends(get_image_service)):
-    return CacheSettingsPayload(cache=image_service.settings.cache.model_dump())
+    return CacheSettingsPayload(
+        memory_cache=image_service.settings.memory_cache.model_dump(),
+        disk_cache=image_service.settings.disk_cache.model_dump(),
+    )
 
 
 @router.put("/cache/settings", response_model=CacheSettingsPayload)
@@ -464,14 +460,21 @@ def update_cache_settings(
     image_service: ImageService = Depends(get_image_service),
 ):
     config = _load_server_config()
-    cache_payload = payload.cache if isinstance(payload.cache, dict) else {}
-    config["cache"] = {**(config.get("cache") or {}), **cache_payload}
+    memory_payload = payload.memory_cache if isinstance(payload.memory_cache, dict) else {}
+    disk_payload = payload.disk_cache if isinstance(payload.disk_cache, dict) else {}
+    config["memory_cache"] = {**(config.get("memory_cache") or {}), **memory_payload}
+    config["disk_cache"] = {**(config.get("disk_cache") or {}), **disk_payload}
     _save_server_config(config)
-    for key, value in cache_payload.items():
-        setattr(image_service.settings.cache, key, value)
-    image_service.begin_cache_task("configuring", "缓存设置更新中")
+    for key, value in memory_payload.items():
+        setattr(image_service.settings.memory_cache, key, value)
+    for key, value in disk_payload.items():
+        setattr(image_service.settings.disk_cache, key, value)
+    image_service.begin_cache_task("configuring", "?????????????????????")
     image_service.end_cache_task()
-    return CacheSettingsPayload(cache=image_service.settings.cache.model_dump())
+    return CacheSettingsPayload(
+        memory_cache=image_service.settings.memory_cache.model_dump(),
+        disk_cache=image_service.settings.disk_cache.model_dump(),
+    )
 
 
 @router.post("/cache/delete", response_model=CacheDeleteResponse)

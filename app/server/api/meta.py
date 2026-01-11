@@ -27,7 +27,7 @@ def api_meta():
 
     settings = deps.get_settings()
     images = settings.images
-    cache = settings.cache
+    disk_cache = settings.disk_cache
 
     # 瓦片层级与尺寸从配置文件中读取
     ratio = images.frame_width / images.frame_height if images.frame_height else 1
@@ -48,7 +48,7 @@ def api_meta():
         "defect_classes": defect_classes,
         "tile": tile_meta,
         "image": image_meta,
-        "defect_cache_expand": cache.defect_cache_expand,
+        "defect_cache_expand": disk_cache.defect_cache_expand,
     }
 
 

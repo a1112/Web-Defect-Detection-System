@@ -470,14 +470,19 @@ class MockDataPayload(BaseModel):
 
 
 class CacheTemplateUpdate(BaseModel):
-    cache: dict[str, Any] | None = None
+    memory_cache: dict[str, Any] | None = None
+    disk_cache: dict[str, Any] | None = None
 
 
 class CacheLineUpdate(BaseModel):
-    key: str = Field(..., description="产线 key（map.json lines[].key）")
-    cache: dict[str, Any] | None = Field(
+    key: str = Field(..., description="?? key?map.json lines[].key?")
+    memory_cache: dict[str, Any] | None = Field(
         default=None,
-        description="写入 configs/current/generated/{key}/{view}/server.json 的 cache 覆盖配置。",
+        description="?? configs/current/generated/{key}/{view}/server.json ? memory_cache ?????",
+    )
+    disk_cache: dict[str, Any] | None = Field(
+        default=None,
+        description="?? configs/current/generated/{key}/{view}/server.json ? disk_cache ?????",
     )
 
 
@@ -506,7 +511,8 @@ class LineViewOverridePayload(BaseModel):
     view: str
     database: dict[str, Any] | None = None
     images: dict[str, Any] | None = None
-    cache: dict[str, Any] | None = None
+    memory_cache: dict[str, Any] | None = None
+    disk_cache: dict[str, Any] | None = None
 
 
 class LineSettingsPayload(BaseModel):
@@ -689,21 +695,59 @@ def get_config_mate():
     return {"path": str(map_path), "payload": payload}
 
 
+def _split_cache_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    memory_cache = payload.get("memory_cache") or {}
+    disk_cache = payload.get("disk_cache") or {}
+    legacy_cache = payload.get("cache") or {}
+    if not isinstance(memory_cache, dict):
+        memory_cache = {}
+    if not isinstance(disk_cache, dict):
+        disk_cache = {}
+    if isinstance(legacy_cache, dict):
+        memory_keys = {
+            "max_frames",
+            "max_tiles",
+            "max_mosaics",
+            "max_defect_crops",
+            "ttl_seconds",
+        }
+        disk_keys = {
+            "defect_cache_enabled",
+            "defect_cache_expand",
+            "disk_cache_enabled",
+            "disk_cache_max_records",
+            "disk_cache_scan_interval_seconds",
+            "disk_cache_cleanup_interval_seconds",
+            "disk_precache_enabled",
+            "disk_precache_levels",
+            "disk_precache_workers",
+        }
+        for key in memory_keys:
+            if key in legacy_cache and key not in memory_cache:
+                memory_cache[key] = legacy_cache[key]
+        for key in disk_keys:
+            if key in legacy_cache and key not in disk_cache:
+                disk_cache[key] = legacy_cache[key]
+    return memory_cache, disk_cache
+
+
 def _load_server_template() -> dict[str, Any]:
     """
     加载 configs/current/server.json 中的 database/images/cache 段。
     """
     _ensure_current_dir()
     if not CURRENT_SERVER_CONFIG_PATH.exists():
-        return {"database": {}, "images": {}, "cache": {}}
+        return {"database": {}, "images": {}, "memory_cache": {}, "disk_cache": {}}
     try:
         payload = json.loads(CURRENT_SERVER_CONFIG_PATH.read_text(encoding="utf-8"))
     except Exception:
-        return {"database": {}, "images": {}, "cache": {}}
+        return {"database": {}, "images": {}, "memory_cache": {}, "disk_cache": {}}
+    memory_cache, disk_cache = _split_cache_payload(payload)
     return {
         "database": payload.get("database") or {},
         "images": payload.get("images") or {},
-        "cache": payload.get("cache") or {},
+        "memory_cache": memory_cache,
+        "disk_cache": disk_cache,
     }
 
 
@@ -720,7 +764,7 @@ def _save_server_template(updates: dict[str, Any]) -> None:
         payload = json.loads(CURRENT_SERVER_CONFIG_PATH.read_text(encoding="utf-8"))
     except Exception:
         payload = {}
-    for key in ("database", "images", "cache"):
+    for key in ("database", "images", "memory_cache", "disk_cache"):
         if key in updates and isinstance(updates.get(key), dict):
             current = payload.get(key) or {}
             if not isinstance(current, dict):
@@ -763,7 +807,7 @@ def _ensure_line_view_override(line_key: str, view_key: str) -> Path:
     override_path = target_dir / "server.json"
     if not override_path.exists():
         override_path.write_text(
-            json.dumps({"database": {}, "images": {}, "cache": {}}, ensure_ascii=False, indent=2),
+            json.dumps({"database": {}, "images": {}, "memory_cache": {}, "disk_cache": {}}, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
     return override_path
@@ -777,10 +821,12 @@ def _load_line_view_override(line_key: str, view_key: str) -> dict[str, Any]:
         payload = {}
     if not isinstance(payload, dict):
         payload = {}
+    memory_cache, disk_cache = _split_cache_payload(payload)
     return {
         "database": payload.get("database") or {},
         "images": payload.get("images") or {},
-        "cache": payload.get("cache") or {},
+        "memory_cache": memory_cache,
+        "disk_cache": disk_cache,
     }
 
 
@@ -798,11 +844,7 @@ def _load_line_defect_class(line_key: str) -> tuple[str, dict[str, Any]]:
 
 def _build_cache_config_payload() -> dict[str, Any]:
     """
-    汇总缓存相关配置：
-    - configs/current 目录及 map.json / server.json。
-    - map.json 中 lines、views。
-    - server.json 中 cache 段，作为模板。
-    - 计算每条产线/视图实际生效的 cache（模板 + line 覆盖）。
+    Build cache config payload with memory_cache and disk_cache.
     """
     _ensure_current_dir()
     root, map_payload = load_map_payload()
@@ -821,29 +863,24 @@ def _build_cache_config_payload() -> dict[str, Any]:
         port = line.get("port") or line.get("listen_port")
 
         view_items: list[dict[str, Any]] = []
-        if isinstance(views, dict) and views:
-            for view_key, view_config in views.items():
-                override_path = CURRENT_DIR / "generated" / key / view_key / "server.json"
-                overrides = {}
-                if override_path.exists():
-                    try:
-                        overrides = json.loads(override_path.read_text(encoding="utf-8"))
-                    except Exception:
-                        overrides = {}
-                override_cache = overrides.get("cache") or {}
-                effective_cache = _deep_merge(templates.get("cache") or {}, override_cache)
-                view_items.append({"view": view_key, "cache": effective_cache})
-        else:
-            override_path = CURRENT_DIR / "generated" / key / "2D" / "server.json"
-            overrides = {}
-            if override_path.exists():
-                try:
-                    overrides = json.loads(override_path.read_text(encoding="utf-8"))
-                except Exception:
-                    overrides = {}
-            override_cache = overrides.get("cache") or {}
-            effective_cache = _deep_merge(templates.get("cache") or {}, override_cache)
-            view_items.append({"view": "2D", "cache": effective_cache})
+        view_keys = list(views.keys()) if isinstance(views, dict) and views else ["2D"]
+        for view_key in view_keys:
+            overrides = _load_line_view_override(key, view_key)
+            effective_memory = _deep_merge(
+                templates.get("memory_cache") or {},
+                overrides.get("memory_cache") or {},
+            )
+            effective_disk = _deep_merge(
+                templates.get("disk_cache") or {},
+                overrides.get("disk_cache") or {},
+            )
+            view_items.append(
+                {
+                    "view": view_key,
+                    "memory_cache": effective_memory,
+                    "disk_cache": effective_disk,
+                }
+            )
 
         line_items.append(
             {
@@ -864,7 +901,10 @@ def _build_cache_config_payload() -> dict[str, Any]:
         "config_root_name": root.name,
         "map_path": str(root / "map.json"),
         "server_path": str(CURRENT_SERVER_CONFIG_PATH),
-        "templates": {"cache": templates.get("cache") or {}},
+        "templates": {
+            "memory_cache": templates.get("memory_cache") or {},
+            "disk_cache": templates.get("disk_cache") or {},
+        },
         "views": views,
         "lines": line_items,
     }
@@ -883,24 +923,28 @@ def get_cache_config() -> dict[str, Any]:
 @router.put("/cache")
 def update_cache_config(payload: CacheConfigUpdatePayload) -> dict[str, Any]:
     """
-    更新缓存配置：
-    - templates: 写回到 configs/current/server.json 的 cache 段。
-    - lines:     按 key 写回 generated/{key}/{view}/server.json 的 cache（深度合并）。
+    Update cache config for memory_cache and disk_cache.
     """
-    # 1. 更新全局模板
     if payload.templates is not None:
-        if payload.templates.cache:
-            _save_server_template({"cache": payload.templates.cache})
+        template_updates: dict[str, Any] = {}
+        if payload.templates.memory_cache:
+            template_updates["memory_cache"] = payload.templates.memory_cache
+        if payload.templates.disk_cache:
+            template_updates["disk_cache"] = payload.templates.disk_cache
+        if template_updates:
+            _save_server_template(template_updates)
 
-    # 2. 更新产线覆盖
     root, map_payload = load_map_payload()
     if payload.lines:
         views = map_payload.get("views") or {}
         view_keys = list(views.keys()) if isinstance(views, dict) and views else ["2D"]
         line_updates: dict[str, dict[str, Any]] = {}
         for item in payload.lines:
-            if item.cache:
-                line_updates[item.key] = item.cache
+            if item.memory_cache or item.disk_cache:
+                line_updates[item.key] = {
+                    "memory_cache": item.memory_cache or {},
+                    "disk_cache": item.disk_cache or {},
+                }
         if line_updates:
             for line in map_payload.get("lines") or []:
                 name = str(line.get("name") or "")
@@ -911,22 +955,37 @@ def update_cache_config(payload: CacheConfigUpdatePayload) -> dict[str, Any]:
                 for view_key in view_keys:
                     override_path = CURRENT_DIR / "generated" / key / view_key / "server.json"
                     override_path.parent.mkdir(parents=True, exist_ok=True)
-                    existing: dict[str, Any] = {"database": {}, "images": {}, "cache": {}}
+                    existing: dict[str, Any] = {
+                        "database": {},
+                        "images": {},
+                        "memory_cache": {},
+                        "disk_cache": {},
+                    }
                     if override_path.exists():
                         try:
                             existing = json.loads(override_path.read_text(encoding="utf-8"))
                         except Exception:
-                            existing = {"database": {}, "images": {}, "cache": {}}
-                    current_cache = existing.get("cache") or {}
-                    if not isinstance(current_cache, dict):
-                        current_cache = {}
-                    existing["cache"] = _deep_merge(current_cache, override)
+                            existing = {
+                                "database": {},
+                                "images": {},
+                                "memory_cache": {},
+                                "disk_cache": {},
+                            }
+                    if not isinstance(existing, dict):
+                        existing = {
+                            "database": {},
+                            "images": {},
+                            "memory_cache": {},
+                            "disk_cache": {},
+                        }
+                    current_memory, current_disk = _split_cache_payload(existing)
+                    existing["memory_cache"] = _deep_merge(current_memory, override.get("memory_cache") or {})
+                    existing["disk_cache"] = _deep_merge(current_disk, override.get("disk_cache") or {})
                     override_path.write_text(
                         json.dumps(existing, ensure_ascii=False, indent=2),
                         encoding="utf-8",
                     )
 
-    # 返回最新视图
     return _build_cache_config_payload()
 
 
@@ -942,7 +1001,7 @@ def get_template_config() -> TemplateConfigPayload:
 def update_template_config(payload: TemplateConfigUpdatePayload) -> TemplateConfigPayload:
     if payload.server is not None:
         server_update: dict[str, Any] = {}
-        for key in ("database", "images", "cache"):
+        for key in ("database", "images", "memory_cache", "disk_cache"):
             value = payload.server.get(key) if isinstance(payload.server, dict) else None
             if isinstance(value, dict):
                 server_update[key] = value
@@ -967,7 +1026,8 @@ def get_line_settings(key: str) -> dict[str, Any]:
                 "view": view_key,
                 "database": overrides.get("database") or {},
                 "images": overrides.get("images") or {},
-                "cache": overrides.get("cache") or {},
+                "memory_cache": overrides.get("memory_cache") or {},
+                "disk_cache": overrides.get("disk_cache") or {},
             }
         )
     defect_mode, defect_payload = _load_line_defect_class(key)
@@ -987,15 +1047,30 @@ def update_line_settings(key: str, payload: LineSettingsPayload) -> dict[str, An
         for item in payload.views:
             view_key = str(item.view or "").strip() or "2D"
             override_path = _ensure_line_view_override(key, view_key)
-            existing: dict[str, Any] = {"database": {}, "images": {}, "cache": {}}
+            existing: dict[str, Any] = {
+                "database": {},
+                "images": {},
+                "memory_cache": {},
+                "disk_cache": {},
+            }
             if override_path.exists():
                 try:
                     existing = json.loads(override_path.read_text(encoding="utf-8"))
                 except Exception:
-                    existing = {"database": {}, "images": {}, "cache": {}}
+                    existing = {
+                        "database": {},
+                        "images": {},
+                        "memory_cache": {},
+                        "disk_cache": {},
+                    }
             if not isinstance(existing, dict):
-                existing = {"database": {}, "images": {}, "cache": {}}
-            for section in ("database", "images", "cache"):
+                existing = {
+                    "database": {},
+                    "images": {},
+                    "memory_cache": {},
+                    "disk_cache": {},
+                }
+            for section in ("database", "images", "memory_cache", "disk_cache"):
                 value = getattr(item, section)
                 if isinstance(value, dict):
                     existing[section] = value
