@@ -219,7 +219,21 @@ class DiskImageCache:
         base = self.cache_dir(cache_root, seq_no, view)
         meta_path = base / "cache.json"
         if meta_path.exists():
-            return
+            try:
+                existing = json.loads(meta_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                existing = None
+            if isinstance(existing, dict):
+                tile_meta = existing.get("tile") or {}
+                defect_meta = existing.get("defects") or {}
+                existing_level = int(tile_meta.get("max_level") or 0)
+                existing_expand = int(defect_meta.get("expand") or 0)
+                if (
+                    existing_level == self.max_level()
+                    and existing_expand == self.defect_expand
+                    and str(existing.get("view") or "") == str(view or self.view_name)
+                ):
+                    return
         base.mkdir(parents=True, exist_ok=True)
         payload = {
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),

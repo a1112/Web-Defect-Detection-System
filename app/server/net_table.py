@@ -34,18 +34,20 @@ def load_map_config(hostname: str | None = None) -> dict[str, Any]:
     root = resolve_net_table_dir(hostname)
     map_path = root / "map.json"
     views: dict[str, Any] = {}
+    log_config: dict[str, Any] = {}
     if map_path.exists() and map_path.stat().st_size > 0:
         payload = json.loads(map_path.read_text(encoding="utf-8"))
         if isinstance(payload, list):
             lines = payload
         elif isinstance(payload, dict):
             views = payload.get("views") or {}
+            log_config = payload.get("log") or {}
             lines = payload.get("lines") or payload.get("items") or payload.get("data") or []
         else:
             lines = []
     else:
         lines = []
-    return {"root": root, "lines": lines, "views": views}
+    return {"root": root, "lines": lines, "views": views, "log": log_config}
 
 
 def load_map_payload(hostname: str | None = None) -> tuple[Path, dict[str, Any]]:
@@ -59,7 +61,7 @@ def load_map_payload(hostname: str | None = None) -> tuple[Path, dict[str, Any]]
         if isinstance(payload, dict):
             views = payload.get("views") or {}
             lines = payload.get("lines") or payload.get("items") or payload.get("data") or []
-            return root, {"views": views, "lines": lines}
+            return root, {"views": views, "lines": lines, "log": payload.get("log") or {}}
     return root, {"views": views, "lines": []}
 
 
@@ -69,9 +71,15 @@ def save_map_payload(payload: dict[str, Any], hostname: str | None = None) -> Pa
     payload = payload or {}
     views = payload.get("views") or {}
     lines = payload.get("lines") or []
+    log_config = payload.get("log") or {}
+    meta = payload.get("meta") or {}
     if not isinstance(lines, list):
         raise ValueError("lines must be a list")
     stored: dict[str, Any] = {"views": views, "lines": lines}
+    if isinstance(log_config, dict) and log_config:
+        stored["log"] = log_config
+    if isinstance(meta, dict) and meta:
+        stored["meta"] = meta
     map_path.write_text(json.dumps(stored, ensure_ascii=False, indent=2), encoding="utf-8")
     return map_path
 
@@ -107,16 +115,20 @@ def build_config_for_line(
     database = payload.get("database", {}) if isinstance(payload.get("database"), dict) else {}
     images = payload.get("images", {}) if isinstance(payload.get("images"), dict) else {}
     cache = payload.get("cache", {}) if isinstance(payload.get("cache"), dict) else {}
+    log = payload.get("log", {}) if isinstance(payload.get("log"), dict) else {}
 
     line_db = line.get("db") or line.get("database") or {}
     line_images = line.get("images") or line.get("image") or {}
     line_cache = line.get("cache") or {}
+    line_log = line.get("log") or {}
     if isinstance(line_db, dict):
         database = _merge_dict(database, line_db)
     if isinstance(line_images, dict):
         images = _merge_dict(images, line_images)
     if isinstance(line_cache, dict):
         cache = _merge_dict(cache, line_cache)
+    if isinstance(line_log, dict):
+        log = _merge_dict(log, line_log)
     if isinstance(view_overrides, dict):
         images = _merge_dict(images, view_overrides)
     if view_name:
@@ -137,6 +149,9 @@ def build_config_for_line(
                 images = _merge_dict(images, override_images)
             if isinstance(override_cache, dict):
                 cache = _merge_dict(cache, override_cache)
+            override_log = overrides.get("log") or {}
+            if isinstance(override_log, dict):
+                log = _merge_dict(log, override_log)
 
     ip = line.get("ip") or database.get("host")
     if ip and not database.get("host"):
@@ -148,6 +163,7 @@ def build_config_for_line(
     payload["database"] = database
     payload["images"] = images
     payload["cache"] = cache
+    payload["log"] = log
 
     line_key = str(line.get("key") or line.get("name") or "line")
     safe_name = line_key.replace("/", "_").replace("\\", "_")

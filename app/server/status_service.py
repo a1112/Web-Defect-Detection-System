@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import logging
 import threading
 from collections import deque
 from datetime import datetime
@@ -123,6 +125,28 @@ class StatusService:
             }
             buffer = self._logs.setdefault(name, deque(maxlen=self._max_logs))
             buffer.append(entry)
+        self._emit_log_line(name, entry)
+
+    def _emit_log_line(self, name: str, entry: dict[str, Any]) -> None:
+        logger = logging.getLogger(f"status.{name}")
+        payload = entry.get("data") or {}
+        message = str(entry.get("message") or "")
+        if payload:
+            try:
+                payload_text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+            except Exception:
+                payload_text = str(payload)
+            message = f"{message} | {payload_text}"
+        level = str(entry.get("level") or "info").lower()
+        try:
+            if level in {"error", "fatal", "failed"}:
+                logger.error(message)
+            elif level in {"warning", "warn"}:
+                logger.warning(message)
+            else:
+                logger.info(message)
+        except Exception:
+            return
 
     def list_services(self) -> list[dict[str, Any]]:
         with self._lock:

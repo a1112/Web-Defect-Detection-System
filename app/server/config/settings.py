@@ -136,10 +136,47 @@ class ImageSettings(BaseModel):
         return normalized
 
 
+class LogSettings(BaseModel):
+    root_dir: Path | None = Field(default=None)
+    path_template: str = Field(
+        default="{root}/{line_key}/{view}/{server_name}",
+        description="Log directory template with placeholders.",
+    )
+    server_name: str = Field(default="api")
+    level: str = Field(default="INFO")
+    format: str = Field(
+        default="%(asctime)s %(levelname)s %(processName)s %(name)s: %(message)s"
+    )
+    rotation_when: str = Field(default="midnight")
+    backup_count: int = Field(default=30, ge=1)
+    modules: dict[str, Any] = Field(default_factory=dict)
+
+    @validator("modules", pre=True)
+    def _coerce_modules(cls, value: Any) -> dict[str, Any]:
+        if value is None:
+            return {}
+        if not isinstance(value, dict):
+            return {}
+        normalized: dict[str, Any] = {}
+        for key, item in value.items():
+            if isinstance(item, bool):
+                normalized[key] = {"enabled": item}
+            else:
+                normalized[key] = item
+        return normalized
+
+    @validator("root_dir", pre=True)
+    def _coerce_root_dir(cls, value: str | Path | None) -> Path | None:
+        if value is None or value == "":
+            return None
+        return Path(value)
+
+
 class ServerSettings(BaseModel):
     database: DatabaseSettings
     images: ImageSettings
     cache: "CacheSettings"
+    log: LogSettings = Field(default_factory=LogSettings)
     config_center_url: Optional[str] = Field(
         default=None,
         description="Config center base URL used for status heartbeat when DEFECT_CONFIG_CENTER_URL is unset.",

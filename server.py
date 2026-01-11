@@ -30,6 +30,16 @@ TEMPLATE_DIR = CONFIG_DIR / "template"
 CURRENT_DIR = CONFIG_DIR / "current"
 TEST_MODE_ENV = "DEFECT_TEST_MODE"
 TESTDATA_DIR_ENV = "DEFECT_TESTDATA_DIR"
+LOG_CONFIG_KEYS = {
+    "root_dir",
+    "path_template",
+    "server_name",
+    "level",
+    "format",
+    "rotation_when",
+    "backup_count",
+    "modules",
+}
 
 
 def _resolve_template() -> Path:
@@ -93,7 +103,12 @@ def _run_uvicorn(
     testdata_dir: Path | None,
     reload: bool,
 ) -> None:
-    _configure_logging(line_name)
+    _configure_logging(
+        line_name,
+        line_key=line_key,
+        line_kind=line_kind,
+        config_path=config_path,
+    )
     _log_database_url(config_path, line_name)
     os.environ[ENV_CONFIG_KEY] = str(config_path.resolve())
     os.environ["DEFECT_LINE_NAME"] = line_name
@@ -123,6 +138,13 @@ def _sanitize_line_name(line_name: str) -> str:
     return cleaned or "default"
 
 
+def _sanitize_log_segment(value: str | None, fallback: str) -> str:
+    if not value:
+        return fallback
+    cleaned = re.sub(r'[<>:"/\\\\|?*\\x00-\\x1F]', "_", str(value).strip())
+    return cleaned or fallback
+
+
 class _MaxLevelFilter(logging.Filter):
     def __init__(self, max_level: int) -> None:
         super().__init__()
@@ -132,21 +154,117 @@ class _MaxLevelFilter(logging.Filter):
         return record.levelno <= self._max_level
 
 
-def _configure_logging(line_name: str) -> None:
-    log_dir = REPO_ROOT / "error_log" / _sanitize_line_name(line_name)
+def _merge_dict(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    for key, value in (override or {}).items():
+        if isinstance(value, dict) and isinstance(base.get(key), dict):
+            base[key] = _merge_dict(dict(base[key]), value)
+        else:
+            base[key] = value
+    return base
+
+
+def _filter_log_config(payload: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    return {key: value for key, value in payload.items() if key in LOG_CONFIG_KEYS}
+
+
+def _resolve_log_dir(
+    log_config: dict[str, Any],
+    *,
+    line_key: str,
+    line_name: str,
+    view: str,
+    server_name: str,
+    default_root: Path,
+) -> Path:
+    root_dir = log_config.get("root_dir") or default_root
+    root_path = Path(root_dir)
+    if not root_path.is_absolute():
+        root_path = (REPO_ROOT.parent / root_path).resolve()
+    template = log_config.get("path_template") or "{root}/{line_key}/{view}/{server_name}"
+    context = {
+        "root": str(root_path),
+        "line_key": _sanitize_log_segment(line_key, "default"),
+        "line_name": _sanitize_log_segment(line_name, "default"),
+        "view": _sanitize_log_segment(view, "default"),
+        "server_name": _sanitize_log_segment(server_name, "api"),
+    }
+    try:
+        rendered = template.format(**context)
+    except Exception:
+        rendered = str(root_path / f"{context['line_key']}/{context['view']}/{context['server_name']}")
+    if "{root}" in template:
+        return Path(rendered)
+    return root_path / rendered
+
+
+def _configure_logging(
+    line_name: str,
+    *,
+    line_key: str | None = None,
+    line_kind: str | None = None,
+    config_path: Path | None = None,
+    log_overrides: dict[str, Any] | None = None,
+    server_name: str | None = None,
+    default_root: Path | None = None,
+) -> None:
+    log_config: dict[str, Any] = {}
+    default_view: str | None = None
+    if config_path and config_path.exists():
+        try:
+            payload = json.loads(config_path.read_text(encoding="utf-8"))
+            log_config = payload.get("log") if isinstance(payload.get("log"), dict) else {}
+            images_payload = payload.get("images") if isinstance(payload.get("images"), dict) else {}
+            default_view = images_payload.get("default_view") if images_payload else None
+        except Exception:
+            log_config = {}
+            default_view = None
+    if log_overrides:
+        log_config = _merge_dict(dict(log_config), log_overrides)
+    log_config = _filter_log_config(log_config)
+
+    if line_kind:
+        cleaned_kind = str(line_kind).strip()
+        if not cleaned_kind or set(cleaned_kind) == {"_"}:
+            line_kind = None
+    if not line_kind and default_view:
+        line_kind = str(default_view)
+
+    effective_line_key = line_key or line_name or "default"
+    effective_view = line_kind or default_view or "default"
+    effective_server_name = (
+        server_name
+        or log_config.get("server_name")
+        or "api"
+    )
+    log_dir = _resolve_log_dir(
+        log_config,
+        line_key=effective_line_key,
+        line_name=line_name,
+        view=effective_view,
+        server_name=effective_server_name,
+        default_root=default_root or (REPO_ROOT.parent / "logs" / "api_log"),
+    )
     log_dir.mkdir(parents=True, exist_ok=True)
     error_path = log_dir / "error.log"
     info_path = log_dir / "server.log"
 
     formatter = logging.Formatter(
-        "%(asctime)s %(levelname)s %(processName)s %(name)s: %(message)s"
+        str(
+            log_config.get("format")
+            or "%(asctime)s %(levelname)s %(processName)s %(name)s: %(message)s"
+        )
     )
+    level = str(log_config.get("level") or "INFO").upper()
+    when = str(log_config.get("rotation_when") or "midnight")
+    backup_count = int(log_config.get("backup_count") or 30)
 
     error_handler = logging.handlers.TimedRotatingFileHandler(
         error_path,
-        when="midnight",
+        when=when,
         interval=1,
-        backupCount=30,
+        backupCount=backup_count,
         encoding="utf-8",
         delay=True,
     )
@@ -156,14 +274,14 @@ def _configure_logging(line_name: str) -> None:
 
     info_handler = logging.handlers.TimedRotatingFileHandler(
         info_path,
-        when="midnight",
+        when=when,
         interval=1,
-        backupCount=30,
+        backupCount=backup_count,
         encoding="utf-8",
         delay=True,
     )
     info_handler.suffix = "%Y-%m-%d"
-    info_handler.setLevel(logging.INFO)
+    info_handler.setLevel(level)
     info_handler.addFilter(_MaxLevelFilter(logging.WARNING))
     info_handler.setFormatter(formatter)
 
@@ -172,15 +290,108 @@ def _configure_logging(line_name: str) -> None:
     console_error_handler.setFormatter(formatter)
 
     console_info_handler = logging.StreamHandler()
-    console_info_handler.setLevel(logging.INFO)
+    console_info_handler.setLevel(level)
     console_info_handler.addFilter(_MaxLevelFilter(logging.WARNING))
     console_info_handler.setFormatter(formatter)
 
     root_logger = logging.getLogger()
+    root_logger.setLevel(level)
     root_logger.addHandler(error_handler)
     root_logger.addHandler(info_handler)
     root_logger.addHandler(console_error_handler)
     root_logger.addHandler(console_info_handler)
+
+    modules = log_config.get("modules") if isinstance(log_config.get("modules"), dict) else {}
+    if modules:
+        _configure_module_logs(
+            modules,
+            log_dir=log_dir,
+            base_level=level,
+            base_format=formatter,
+            base_when=when,
+            base_backup=backup_count,
+        )
+
+
+def _configure_module_logs(
+    modules: dict[str, Any],
+    *,
+    log_dir: Path,
+    base_level: str,
+    base_format: logging.Formatter,
+    base_when: str,
+    base_backup: int,
+) -> None:
+    for name, module_cfg in modules.items():
+        if module_cfg is False:
+            continue
+        if module_cfg is True:
+            module_cfg = {"enabled": True}
+        if not isinstance(module_cfg, dict):
+            continue
+        if not module_cfg.get("enabled", False):
+            continue
+        logger_name = _resolve_module_logger_name(name, module_cfg)
+        module_logger = logging.getLogger(logger_name)
+        module_level = str(module_cfg.get("level") or base_level).upper()
+        module_logger.setLevel(module_level)
+
+        module_path = _resolve_module_log_path(log_dir, name, module_cfg)
+        module_path.parent.mkdir(parents=True, exist_ok=True)
+        if _has_handler(module_logger, module_path):
+            continue
+        module_formatter = logging.Formatter(
+            str(module_cfg.get("format") or base_format._fmt)
+        )
+        when = str(module_cfg.get("rotation_when") or base_when)
+        backup_count = int(module_cfg.get("backup_count") or base_backup)
+        handler = logging.handlers.TimedRotatingFileHandler(
+            module_path,
+            when=when,
+            interval=1,
+            backupCount=backup_count,
+            encoding="utf-8",
+            delay=True,
+        )
+        handler.suffix = "%Y-%m-%d"
+        handler.setLevel(module_level)
+        handler.setFormatter(module_formatter)
+        module_logger.addHandler(handler)
+
+
+def _resolve_module_log_path(log_dir: Path, name: str, module_cfg: dict[str, Any]) -> Path:
+    path_value = module_cfg.get("path")
+    if path_value:
+        path = Path(str(path_value))
+        if path.is_absolute():
+            return path
+        return log_dir / path
+    safe_name = _sanitize_log_segment(name, "module")
+    return log_dir / safe_name / "log.log"
+
+
+def _resolve_module_logger_name(name: str, module_cfg: dict[str, Any]) -> str:
+    alias = module_cfg.get("logger") if isinstance(module_cfg, dict) else None
+    if alias:
+        return str(alias)
+    aliases = {
+        "image_service": "app.server.services.image_service",
+        "disk_image_cache": "app.server.cache.disk_image_cache",
+        "cache_generate": "status.cache_generate",
+    }
+    return aliases.get(name, name)
+
+
+def _has_handler(logger: logging.Logger, path: Path) -> bool:
+    target = str(path.resolve())
+    for handler in logger.handlers:
+        if isinstance(handler, logging.handlers.TimedRotatingFileHandler):
+            try:
+                if str(Path(handler.baseFilename).resolve()) == target:
+                    return True
+            except Exception:
+                continue
+    return False
 
 
 def _log_database_url(config_path: Path, line_name: str) -> None:
@@ -724,6 +935,7 @@ def main() -> None:
     config = load_map_config()
     lines: list[dict[str, Any]] = config.get("lines") or []
     views: dict[str, Any] = config.get("views") or {}
+    log_defaults = config.get("log") or {}
     if not lines:
         raise RuntimeError("No lines found; check configs/current/map.json")
 
@@ -754,10 +966,18 @@ def main() -> None:
         for view_index, (view_key, view_config) in enumerate(view_items):
             offset = _view_port_offset(view_key, view_config if isinstance(view_config, dict) else None, view_index)
             view_port = port + offset
-            view_payload = view_config if isinstance(view_config, dict) else {}
+            view_payload = dict(view_config) if isinstance(view_config, dict) else {}
+            view_log = _filter_log_config(view_payload.pop("log", None))
+            line_payload = dict(line)
+            base_log = _filter_log_config(log_defaults)
+            line_log = _filter_log_config(line_payload.get("log"))
+            effective_log = _merge_dict(dict(base_log), line_log)
+            effective_log = _merge_dict(effective_log, view_log)
+            if effective_log:
+                line_payload["log"] = effective_log
             override_path = CURRENT_DIR / "generated" / line_key / view_key / "server.json"
             config_path = build_config_for_line(
-                line,
+                line_payload,
                 template,
                 view_name=view_key,
                 view_overrides=view_payload,
@@ -787,6 +1007,23 @@ def main() -> None:
             )
 
     manager.start_all()
+    config_center_log = _filter_log_config(log_defaults)
+    config_center_root = log_defaults.get("config_center_root_dir") if isinstance(log_defaults, dict) else None
+    if config_center_root:
+        config_center_log["root_dir"] = config_center_root
+    config_center_name = (
+        str(log_defaults.get("config_center_name") or "config_center")
+        if isinstance(log_defaults, dict)
+        else "config_center"
+    )
+    _configure_logging(
+        "config_center",
+        line_key="config_center",
+        line_kind="center",
+        log_overrides=config_center_log,
+        server_name=config_center_name,
+        default_root=REPO_ROOT.parent / "logs" / "config_center_log",
+    )
     config_app = create_app(manager)
     uvicorn.run(config_app, host="0.0.0.0", port=8119, reload=False, workers=1)
 

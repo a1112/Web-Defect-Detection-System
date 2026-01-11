@@ -337,10 +337,16 @@ def create_app(manager: ProcessManager) -> FastAPI:
         current_root, current_payload = load_map_payload()
         current_views = current_payload.get("views") or {}
         current_lines = current_payload.get("lines") or []
+        current_log = current_payload.get("log") or {}
+        current_meta = current_payload.get("meta") or {}
         merged = {
             "views": current_payload.get("views") or {},
             "lines": payload.lines,
         }
+        if isinstance(current_log, dict) and current_log:
+            merged["log"] = current_log
+        if isinstance(current_meta, dict) and current_meta:
+            merged["meta"] = current_meta
         map_path = save_map_payload(merged)
         generated_root = resolve_net_table_dir() / "generated"
         generated_root.mkdir(parents=True, exist_ok=True)

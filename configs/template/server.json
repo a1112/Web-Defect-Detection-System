@@ -36,5 +36,17 @@
     "disk_precache_levels": 4,
     "disk_precache_workers": 2
   },
+  "log": {
+    "root_dir": "logs/api_log",
+    "path_template": "{root}/{line_key}/{view}/{server_name}",
+    "server_name": "api",
+    "level": "INFO",
+    "format": "%(asctime)s %(levelname)s %(processName)s %(name)s: %(message)s",
+    "rotation_when": "midnight",
+    "backup_count": 30,
+    "modules": {
+      "cache_generate": true
+    }
+  },
   "config_center_url": "http://127.0.0.1:8119"
 }

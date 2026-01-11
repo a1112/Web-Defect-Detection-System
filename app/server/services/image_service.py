@@ -6,6 +6,7 @@ import threading
 import queue
 import shutil
 import time
+import os
 from pathlib import Path
 from typing import List, Optional, Tuple
 import json
@@ -199,7 +200,6 @@ class ImageService:
                 "surface": surface,
                 "surfaces": surfaces,
                 "view": self.settings.images.default_view,
-                "cache_root": str(self._cache_root(surface)) if surface else None,
                 "cache_dir": cache_dir,
                 "cache_dirs": cache_dirs,
                 "steel_no": self._resolve_steel_id(seq_no) if seq_no is not None else None,
@@ -460,6 +460,7 @@ class ImageService:
                 "view": self.settings.images.default_view,
             },
         )
+        self._update_cache_records(seq_no, view_dir=self.settings.images.default_view)
 
     def _wait_if_cache_paused(self, task_info: Optional[dict[str, object]] = None) -> None:
         while self._cache_pause.is_set() and not self._disk_cache_stop.is_set():
@@ -501,25 +502,13 @@ class ImageService:
         view_dir = self.settings.images.default_view
         expected_level = self.disk_cache.max_level()
         expected_expand = self.disk_cache.defect_expand
+        has_any_view_data = False
         for surface in ("top", "bottom"):
+            surface_root = self._surface_root(surface)
+            if not self._has_view_data(surface_root, seq_no, view_dir):
+                continue
+            has_any_view_data = True
             meta = self.disk_cache.read_meta(self._cache_root(surface), seq_no, view=view_dir)
-            if not meta and view_dir.lower() != "2d":
-                surface_root = self._surface_root(surface)
-                seq_no_fs = self._resolve_seq_no_for_fs(surface_root, seq_no)
-                view_path = surface_root / str(seq_no_fs) / view_dir
-                has_view_data = False
-                if view_path.exists():
-                    record_path = view_path / "record.json"
-                    if record_path.exists():
-                        has_view_data = True
-                    else:
-                        ext = self.settings.images.file_extension
-                        try:
-                            has_view_data = any(view_path.glob(f"*.{ext}"))
-                        except OSError:
-                            has_view_data = False
-                if not has_view_data:
-                    meta = self.disk_cache.read_meta(self._cache_root(surface), seq_no, view="2D")
             if not meta:
                 return True
             meta_tile = meta.get("tile") or {}
@@ -530,7 +519,112 @@ class ImageService:
                 return True
             if meta_expand != expected_expand:
                 return True
+        if not has_any_view_data:
+            return False
         return False
+
+    def _has_view_data(self, surface_root: Path, seq_no: int, view_dir: str) -> bool:
+        seq_no_fs = self._resolve_seq_no_for_fs(surface_root, seq_no)
+        view_path = surface_root / str(seq_no_fs) / view_dir
+        if not view_path.exists():
+            return False
+        record_path = view_path / "record.json"
+        if record_path.exists():
+            return True
+        ext = self.settings.images.file_extension
+        try:
+            return any(view_path.glob(f"*.{ext}"))
+        except OSError:
+            return False
+
+    def _get_latest_cached_seq(self, *, view_dir: str) -> Optional[int]:
+        try:
+            from app.server import deps
+            from sqlalchemy import func
+            from app.server.db.models.rbac import CacheRecord
+
+            line_key = os.getenv("DEFECT_LINE_KEY") or os.getenv("DEFECT_LINE_NAME") or "default"
+            with deps.get_management_db_context() as session:
+                max_seq = (
+                    session.query(func.max(CacheRecord.seq_no))
+                    .filter(
+                        CacheRecord.line_key == line_key,
+                        CacheRecord.view == view_dir,
+                    )
+                    .scalar()
+                )
+            if max_seq is None:
+                return None
+            return int(max_seq)
+        except Exception:
+            return None
+
+    def _get_latest_steel_seq(self) -> Optional[int]:
+        try:
+            from app.server import deps
+            from sqlalchemy import func
+            from app.server.db.models.ncdplate import Steelrecord
+
+            with deps.get_main_db_context() as session:
+                max_seq = session.query(func.max(Steelrecord.seqNo)).scalar()
+            if max_seq is None:
+                return None
+            return int(max_seq)
+        except Exception:
+            return None
+
+    def _update_cache_records(self, seq_no: int, *, view_dir: str) -> None:
+        if not self.settings.cache.disk_cache_enabled:
+            return
+        line_key = os.getenv("DEFECT_LINE_KEY") or os.getenv("DEFECT_LINE_NAME") or "default"
+        try:
+            from app.server import deps
+            from app.server.db.models.rbac import CacheRecord
+
+            updated = False
+            with deps.get_management_db_context() as session:
+                for surface in ("top", "bottom"):
+                    cache_root = self._cache_root(surface)
+                    meta = self.disk_cache.read_meta(cache_root, seq_no, view=view_dir)
+                    existing = (
+                        session.query(CacheRecord)
+                        .filter(
+                            CacheRecord.line_key == line_key,
+                            CacheRecord.seq_no == seq_no,
+                            CacheRecord.surface == surface,
+                            CacheRecord.view == view_dir,
+                        )
+                        .one_or_none()
+                    )
+                    if not meta:
+                        if existing is not None:
+                            session.delete(existing)
+                            updated = True
+                        continue
+                    tile = meta.get("tile") or {}
+                    defects = meta.get("defects") or {}
+                    payload = {
+                        "line_key": line_key,
+                        "seq_no": seq_no,
+                        "surface": surface,
+                        "view": view_dir,
+                        "tile_max_level": int(tile.get("max_level") or 0),
+                        "tile_size": int(tile.get("tile_size") or 0),
+                        "defect_expand": int(defects.get("expand") or 0),
+                        "defect_cache_enabled": bool(defects.get("enabled", True)),
+                        "disk_cache_enabled": bool(self.settings.cache.disk_cache_enabled),
+                        "meta_json": json.dumps(meta, ensure_ascii=False),
+                    }
+                    if existing is None:
+                        session.add(CacheRecord(**payload))
+                    else:
+                        for key, value in payload.items():
+                            setattr(existing, key, value)
+                    updated = True
+                if updated:
+                    session.commit()
+        except Exception:
+            return
 
     def _run_cache_task_delete(self, seqs: list[int]) -> None:
         seq_list = [int(seq) for seq in seqs]
@@ -612,7 +706,32 @@ class ImageService:
         self._set_cache_status(state="ready", message="就绪", task=task_info)
 
     def _run_cache_task_auto(self, *, precache_levels: int) -> None:
-        seq_list = self._list_latest_seq_candidates(limit=100)
+        view_dir = self.settings.images.default_view
+        max_seq = self._get_latest_steel_seq()
+        if max_seq is None:
+            self._set_cache_status(state="ready", message="等待缓存任务", task=None)
+            return
+        start_seq = max(1, int(max_seq) - 199 + 1)
+        latest_cached = self._get_latest_cached_seq(view_dir=view_dir)
+        if latest_cached is None or latest_cached < start_seq:
+            seq_list = list(range(start_seq, int(max_seq) + 1))
+        elif latest_cached >= int(max_seq):
+            task_info = {
+                "type": "auto",
+                "total": 0,
+                "done": 0,
+                "current_seq": int(max_seq) + 1,
+            }
+            self._set_cache_status(
+                state="ready",
+                message=f"waiting for {int(max_seq) + 1} data",
+                seq_no=int(max_seq) + 1,
+                task=task_info,
+            )
+            return
+        else:
+            seq_list = list(range(int(latest_cached) + 1, int(max_seq) + 1))
+
         if not seq_list:
             self._set_cache_status(state="ready", message="等待缓存任务", task=None)
             return
@@ -622,24 +741,10 @@ class ImageService:
             "done": 0,
             "current_seq": None,
         }
-        if not any(self._needs_precache_seq(seq_no) for seq_no in seq_list):
-            task_info["done"] = task_info["total"]
-            wait_seq = seq_list[-1] + 1
-            task_info["current_seq"] = wait_seq
-            self._set_cache_status(
-                state="ready",
-                message=f"等待 {wait_seq} 数据中",
-                seq_no=wait_seq,
-                task=task_info,
-            )
-            return
         for index, seq_no in enumerate(seq_list, start=1):
             if self._cache_abort.is_set() or self._disk_cache_stop.is_set():
                 break
             self._wait_if_cache_paused(task_info)
-            if not self._needs_precache_seq(seq_no):
-                task_info["done"] = index
-                continue
             task_info["current_seq"] = seq_no
             task_info["done"] = index - 1
             self._precache_seq_pair(
