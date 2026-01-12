@@ -39,6 +39,7 @@ class ImageService:
         memory_cache = settings.memory_cache
         disk_cache = settings.disk_cache
         self.mode = image_settings.mode
+        self._apply_auto_size(image_settings)
         ttl_seconds = memory_cache.ttl_seconds
         def _resolve_limit(value: int) -> int:
             if value < 0:
@@ -113,6 +114,98 @@ class ImageService:
         self._steel_id_cache: dict[int, str] = {}
         self._cache_pause = threading.Event()
         self._cache_abort = threading.Event()
+
+    def _apply_auto_size(self, image_settings: ImageSettings) -> None:
+        if not bool(getattr(image_settings, "auto_size", False)):
+            return
+
+        view_dir = image_settings.default_view
+        top_root = image_settings.top_root
+        if not top_root.exists():
+            logger.warning("auto_size skipped: top_root not found (%s)", top_root)
+            return
+
+        seq_no = self._find_max_seq(top_root)
+        if seq_no is None:
+            logger.warning("auto_size skipped: no seq directory under %s", top_root)
+            return
+
+        frames: list[Path] = []
+        try:
+            frames = self._list_frame_paths("top", seq_no, view_dir)
+        except FileNotFoundError:
+            frames = []
+        if not frames and view_dir.lower() != "2d":
+            try:
+                frames = self._list_frame_paths("top", seq_no, "2D")
+            except FileNotFoundError:
+                frames = []
+
+        if not frames:
+            logger.warning("auto_size skipped: no frames found for seq=%s view=%s", seq_no, view_dir)
+            return
+
+        latest = frames[-1]
+        try:
+            payload = latest.read_bytes()
+        except Exception as exc:
+            logger.warning("auto_size failed: read image %s error=%s", latest, exc)
+            return
+
+        try:
+            image = open_image_from_bytes(payload, mode=self.mode)
+            frame_width, frame_height = image.size
+        except Exception as exc:
+            logger.warning("auto_size failed: decode image %s error=%s", latest, exc)
+            return
+
+        image_settings.frame_width = int(frame_width)
+        image_settings.frame_height = int(frame_height)
+        image_settings.tile_default_size = int(frame_height)
+
+        meta = self._extract_tail_metadata(payload)
+        org_width = meta.get("orgWidth") if isinstance(meta, dict) else None
+        org_height = meta.get("orgHeight") if isinstance(meta, dict) else None
+        if isinstance(org_width, int) and org_width > 0:
+            image_settings.org_width = org_width
+        if isinstance(org_height, int) and org_height > 0:
+            image_settings.org_height = org_height
+
+        if image_settings.org_width and image_settings.org_height:
+            image_settings.image_scale_x = image_settings.frame_width / image_settings.org_width
+            image_settings.image_scale_y = image_settings.frame_height / image_settings.org_height
+        else:
+            image_settings.image_scale_x = 1.0
+            image_settings.image_scale_y = 1.0
+
+        logger.info(
+            "auto_size applied: frame=%sx%s org=%sx%s scale=%sx%s (seq=%s)",
+            image_settings.frame_width,
+            image_settings.frame_height,
+            image_settings.org_width,
+            image_settings.org_height,
+            image_settings.image_scale_x,
+            image_settings.image_scale_y,
+            seq_no,
+        )
+
+    @staticmethod
+    def _extract_tail_metadata(payload: bytes) -> dict | None:
+        if not payload:
+            return None
+        tail = payload[-4096:]
+        try:
+            text = tail.decode("utf-8", errors="ignore")
+        except Exception:
+            return None
+        start = text.rfind("{")
+        end = text.rfind("}")
+        if start == -1 or end == -1 or end <= start:
+            return None
+        try:
+            return json.loads(text[start : end + 1])
+        except Exception:
+            return None
 
     def get_cache_status(self) -> dict[str, object]:
         with self._cache_status_lock:
@@ -904,18 +997,24 @@ class ImageService:
         # - leftInSrcImg/... 一列表示在“原始源图像”上的像素坐标（单帧）——这是可信坐标。
         # - leftInImg/... 已弃用，不再直接用于裁剪。
         # 这里优先使用 bbox_source（来源于 leftInSrcImg 等），
-        # 在 SMALL 实例下再根据 pixel_scale 做缩放，使之适配当前实例实际帧尺寸。
+        # 根据 image_scale_x/image_scale_y 做缩放，使之适配当前实例实际帧尺寸。
         base_bbox = defect.bbox_source or defect.bbox_image
         if base_bbox is None:
             raise FileNotFoundError(f"Defect {defect_id} bbox not available on {surface}")
 
-        # 根据当前实例的 pixel_scale（例如 SMALL 模式下为 0.5）缩放坐标
+        # 根据当前实例的 image_scale_x/image_scale_y 缩放坐标
         try:
-            scale = float(getattr(self.settings.images, "pixel_scale", 1.0))
+            scale_x = float(getattr(self.settings.images, "image_scale_x", 1.0))
         except Exception:
-            scale = 1.0
-        if scale <= 0:
-            scale = 1.0
+            scale_x = 1.0
+        try:
+            scale_y = float(getattr(self.settings.images, "image_scale_y", 1.0))
+        except Exception:
+            scale_y = 1.0
+        if scale_x <= 0:
+            scale_x = 1.0
+        if scale_y <= 0:
+            scale_y = 1.0
 
         # 计算用于磁盘缓存文件名的“源坐标 + 扩展配置”键，确保同一缺陷在同一配置下命中。
         width_src = max(0, base_bbox.right - base_bbox.left)
@@ -968,11 +1067,11 @@ class ImageService:
             result = (payload, defect)
             self.defect_crop_cache.put(cache_key, result)
             return result
-        if scale != 1.0:
-            left = int(round(base_bbox.left * scale))
-            top = int(round(base_bbox.top * scale))
-            right = int(round(base_bbox.right * scale))
-            bottom = int(round(base_bbox.bottom * scale))
+        if scale_x != 1.0 or scale_y != 1.0:
+            left = int(round(base_bbox.left * scale_x))
+            top = int(round(base_bbox.top * scale_y))
+            right = int(round(base_bbox.right * scale_x))
+            bottom = int(round(base_bbox.bottom * scale_y))
         else:
             left = base_bbox.left
             top = base_bbox.top

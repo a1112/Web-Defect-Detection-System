@@ -27,21 +27,27 @@ def api_defects(
     # SMALL 实例：如果配置了像素缩放（例如 0.5），则需要对 bbox_source/bbox_image 做对应缩放，
     # 使返回的坐标与当前实例提供的图像尺寸保持一致。
     try:
-        scale = float(getattr(image_service.settings.images, "pixel_scale", 1.0))
+        scale_x = float(getattr(image_service.settings.images, "image_scale_x", 1.0))
     except Exception:
-        scale = 1.0
-    if scale <= 0:
-        scale = 1.0
+        scale_x = 1.0
+    try:
+        scale_y = float(getattr(image_service.settings.images, "image_scale_y", 1.0))
+    except Exception:
+        scale_y = 1.0
+    if scale_x <= 0:
+        scale_x = 1.0
+    if scale_y <= 0:
+        scale_y = 1.0
 
     for record in base.items:
         bbox = record.bbox_source or record.bbox_image
         bbox_obj = record.bbox_object
 
-        if scale != 1.0 and bbox is not None:
-            left = int(round(bbox.left * scale))
-            top = int(round(bbox.top * scale))
-            right = int(round(bbox.right * scale))
-            bottom = int(round(bbox.bottom * scale))
+        if (scale_x != 1.0 or scale_y != 1.0) and bbox is not None:
+            left = int(round(bbox.left * scale_x))
+            top = int(round(bbox.top * scale_y))
+            right = int(round(bbox.right * scale_x))
+            bottom = int(round(bbox.bottom * scale_y))
         elif bbox is not None:
             left = bbox.left
             top = bbox.top

@@ -64,16 +64,16 @@ class ImageSettings(BaseModel):
     disk_cache_bottom_root: Optional[Path] = Field(default=None)
     default_view: str = Field(default="2D")
     file_extension: str = Field(default="jpg")
+    auto_size: bool = Field(default=False, description="Auto detect frame/org size from latest image.")
     frame_width: int = Field(default=16384, ge=1)
     frame_height: int = Field(default=1024, ge=1)
+    org_width: Optional[int] = Field(default=None, ge=1)
+    org_height: Optional[int] = Field(default=None, ge=1)
+    image_scale_x: float = Field(default=1.0, gt=0)
+    image_scale_y: float = Field(default=1.0, gt=0)
     tile_max_level: int = Field(default=2, ge=0)
     tile_min_level: int = Field(default=0, ge=0)
     tile_default_size: Optional[int] = Field(default=None, ge=64)
-    pixel_scale: float = Field(
-        default=1.0,
-        gt=0,
-        description="Scale factor applied to image-space coordinates (e.g. 0.5 for half-resolution SMALL images).",
-    )
     tile_prefetch_enabled: bool = Field(default=True)
     tile_prefetch_workers: int = Field(default=2, ge=1)
     tile_prefetch_ttl_seconds: int = Field(default=300, ge=1)

@@ -16,6 +16,7 @@
     "disk_cache_bottom_root": "\\\\{ip}\\imgsrc2",
     "default_view": "2D",
     "file_extension": "jpg",
+    "auto_size": true,
     "frame_width": 16384,
     "frame_height": 1024,
     "mode": "L"

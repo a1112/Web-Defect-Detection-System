@@ -11,3 +11,4 @@ casbin
 casbin_sqlalchemy_adapter
 psutil
 colorlog
+websocket-client
