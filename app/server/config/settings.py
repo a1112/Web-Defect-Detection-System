@@ -317,7 +317,7 @@ class DiskCacheSettings(BaseModel):
     disk_cache_cleanup_interval_seconds: int = Field(default=60, ge=1)
     disk_precache_enabled: bool = Field(default=False)
     disk_precache_levels: int = Field(default=1, ge=1)
-    disk_precache_workers: int = Field(default=2, ge=1)
+    disk_precache_workers: int = Field(default=4, ge=1)
 
 
 
