@@ -15,8 +15,8 @@ from sqlalchemy import func
 
 from app.server import deps
 from app.server.api.dependencies import get_image_service
-from app.server.db.models.ncdplate import Steelrecord
-from app.server.db.models.rbac import CacheRecord
+from app.server.db.models.source.ncdplate import Steelrecord
+from app.server.db.models.management.rbac import CacheRecord
 from app.server.services.image_service import ImageService
 from app.server.config.settings import CURRENT_DIR, DEFAULT_CONFIG_NAME, ensure_current_config_dir
 from pathlib import Path

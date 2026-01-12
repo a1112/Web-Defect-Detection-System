@@ -20,11 +20,11 @@ from sqlalchemy import func, text
 import requests
 
 from app.server import deps
-from app.server.api import defects, health, images, steels, meta, net, admin, cache, status
+from app.server.api import defects, health, images, steels, meta, net, admin, cache, status, annotations
 from app.server.api.dependencies import get_image_service
 from app.server.config.settings import ENV_CONFIG_KEY, ensure_config_file
 from app.server.rbac.manager import bootstrap_management
-from app.server.db.models.ncdplate import Steelrecord
+from app.server.db.models.source.ncdplate import Steelrecord
 from app.server.status_service import get_status_service
 
 logger = logging.getLogger(__name__)
@@ -237,6 +237,7 @@ def _ensure_testdata_dir(testdata_dir: Path) -> None:
 app.include_router(health.router)
 app.include_router(steels.router)
 app.include_router(defects.router)
+app.include_router(annotations.router)
 app.include_router(images.router)
 app.include_router(meta.router)
 app.include_router(net.router)

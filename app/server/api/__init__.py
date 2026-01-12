@@ -1,6 +1,6 @@
 """API routers for the server."""
 
-from . import health, steels, defects, images, meta, net, admin, cache, status
+from . import health, steels, defects, images, meta, net, admin, cache, status, annotations
 
-__all__ = ["health", "steels", "defects", "images", "meta", "net", "admin", "cache", "status"]
+__all__ = ["health", "steels", "defects", "images", "meta", "net", "admin", "cache", "status", "annotations"]
 

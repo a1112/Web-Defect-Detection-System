@@ -4,7 +4,7 @@ from typing import List, Optional
 
 from sqlalchemy.orm import Session
 
-from ..db.models.ncdplatedefect import Camdefect1, Camdefect2
+from ..db.models.source.ncdplatedefect import Camdefect1, Camdefect2
 from ..schemas import (
     BoundingBox,
     DefectRecord,

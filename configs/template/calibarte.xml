@@ -1,0 +1,24 @@
+<?xml version = "1.0" encoding="UTF-8"?>
+<标定参数配置>
+<相机配置>
+<相机1>
+ <id>S0001</id>
+ <原图宽度>32768</原图宽度>
+<重合区域1>
+ <start>8000</start>
+ <end>8200</end>
+ <veroffset>0</veroffset>
+</重合区域1>
+<重合区域2>
+ <start>16000</start>
+ <end>16200</end>
+ <veroffset>0</veroffset>
+</重合区域2>
+<重合区域3>
+ <start>24000</start>
+ <end>24200</end>
+ <veroffset>0</veroffset>
+</重合区域3>
+</相机1>
+</相机配置>
+</标定参数配置>

@@ -150,3 +150,57 @@ class HealthStatus(BaseModel):
     timestamp: datetime
     version: Optional[str] = None
     database: Optional[DatabaseStatus] = None
+
+
+class AnnotationBBox(BaseModel):
+    left: int
+    top: int
+    right: int
+    bottom: int
+
+
+class DefectAnnotationItem(BaseModel):
+    id: int
+    line_key: str
+    seq_no: int
+    surface: Literal["top", "bottom"]
+    view: str
+    user: Optional[str] = None
+    method: str
+    bbox: AnnotationBBox
+    class_id: Optional[int] = None
+    class_name: Optional[str] = None
+    mark: Optional[str] = None
+    export_payload: Optional[dict] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+
+class DefectAnnotationCreate(BaseModel):
+    line_key: str
+    seq_no: int
+    surface: Literal["top", "bottom"]
+    view: str
+    user: Optional[str] = None
+    method: str = "manual"
+    bbox: AnnotationBBox
+    class_id: Optional[int] = None
+    class_name: Optional[str] = None
+    mark: Optional[str] = None
+    export_payload: Optional[dict] = None
+    extra: Optional[str] = None
+
+
+class DefectAnnotationUpdate(BaseModel):
+    user: Optional[str] = None
+    method: Optional[str] = None
+    bbox: Optional[AnnotationBBox] = None
+    class_id: Optional[int] = None
+    class_name: Optional[str] = None
+    mark: Optional[str] = None
+    export_payload: Optional[dict] = None
+    extra: Optional[str] = None
+
+
+class DefectAnnotationListResponse(BaseModel):
+    items: list[DefectAnnotationItem]

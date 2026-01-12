@@ -566,7 +566,7 @@ class ImageService:
         try:
             from app.server import deps
             from sqlalchemy import func
-            from app.server.db.models.ncdplate import Steelrecord
+            from app.server.db.models.source.ncdplate import Steelrecord
 
             with deps.get_main_db_context() as session:
                 max_seq = (
@@ -635,7 +635,7 @@ class ImageService:
         try:
             from app.server import deps
             from sqlalchemy import func
-            from app.server.db.models.rbac import CacheRecord
+            from app.server.db.models.management.rbac import CacheRecord
 
             line_key = os.getenv("DEFECT_LINE_KEY") or os.getenv("DEFECT_LINE_NAME") or "default"
             with deps.get_management_db_context() as session:
@@ -657,7 +657,7 @@ class ImageService:
         try:
             from app.server import deps
             from sqlalchemy import func
-            from app.server.db.models.ncdplate import Steelrecord
+            from app.server.db.models.source.ncdplate import Steelrecord
 
             with deps.get_main_db_context() as session:
                 max_seq = session.query(func.max(Steelrecord.seqNo)).scalar()
@@ -673,7 +673,7 @@ class ImageService:
         line_key = os.getenv("DEFECT_LINE_KEY") or os.getenv("DEFECT_LINE_NAME") or "default"
         try:
             from app.server import deps
-            from app.server.db.models.rbac import CacheRecord
+            from app.server.db.models.management.rbac import CacheRecord
 
             updated = False
             with deps.get_management_db_context() as session:
@@ -2152,7 +2152,7 @@ class ImageService:
             return self._steel_id_cache.get(seq_no)
         try:
             from app.server import deps
-            from app.server.db.models.ncdplate import Steelrecord
+            from app.server.db.models.source.ncdplate import Steelrecord
 
             with deps.get_main_db_context() as session:
                 steel_id = (

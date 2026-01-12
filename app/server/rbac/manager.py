@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.server.config.settings import ServerSettings
 from app.server.database import _build_url, _create_engine, ensure_database_exists
-from app.server.db.models import rbac as rbac_models
+from app.server.db.models.management import rbac as rbac_models
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 CASBIN_MODEL_PATH = REPO_ROOT / "configs" / "casbin" / "model.conf"
