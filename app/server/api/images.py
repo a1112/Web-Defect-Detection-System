@@ -52,11 +52,21 @@ def api_defect_crop(
     expand: Optional[int] = Query(default=None, ge=0, le=512),
     width: Optional[int] = Query(default=None, ge=1, le=4096),
     height: Optional[int] = Query(default=None, ge=1, le=4096),
+    force_crop: bool = Query(default=False),
     fmt: str = Query(default="JPEG"),
     service: ImageService = Depends(get_image_service),
 ):
     """按缺陷 ID 裁剪缺陷区域，并在响应头返回缺陷元数据。"""
     try:
+        logger.info(
+            "defect crop request id=%s surface=%s expand=%s width=%s height=%s fmt=%s",
+            defect_id,
+            surface,
+            expand,
+            width,
+            height,
+            fmt,
+        )
         data, defect = service.crop_defect(
             surface=surface,
             defect_id=defect_id,
@@ -64,6 +74,7 @@ def api_defect_crop(
             width=width,
             height=height,
             fmt=fmt,
+            use_cache=not force_crop,
         )
         headers = {
             "X-Seq-No": str(defect.seq_no),
@@ -78,20 +89,43 @@ def api_defect_crop(
 @router.get("/images/crop")
 def api_custom_crop(
     surface: str = Query(..., pattern="^(top|bottom)$"),
-    seq_no: int = Query(...),
-    image_index: int = Query(...),
-    x: int = Query(..., ge=0),
-    y: int = Query(..., ge=0),
-    w: int = Query(..., ge=1),
-    h: int = Query(..., ge=1),
+    defect_id: Optional[int] = Query(default=None, ge=1),
+    seq_no: Optional[int] = Query(default=None),
+    image_index: Optional[int] = Query(default=None),
+    x: Optional[int] = Query(default=None, ge=0),
+    y: Optional[int] = Query(default=None, ge=0),
+    w: Optional[int] = Query(default=None, ge=1),
+    h: Optional[int] = Query(default=None, ge=1),
     expand: int = Query(default=0, ge=0, le=512),
     width: Optional[int] = Query(default=None, ge=1, le=4096),
     height: Optional[int] = Query(default=None, ge=1, le=4096),
+    force_crop: bool = Query(default=False),
     fmt: str = Query(default="JPEG"),
     service: ImageService = Depends(get_image_service),
 ):
     """按自定义坐标裁剪指定帧，支持扩展边界及输出尺寸。"""
     try:
+        if defect_id is not None:
+            payload, defect = service.crop_defect(
+                surface=surface,
+                defect_id=defect_id,
+                expand=expand,
+                width=width,
+                height=height,
+                fmt=fmt,
+                use_cache=not force_crop,
+            )
+            headers = {
+                "X-Seq-No": str(defect.seq_no),
+                "X-Image-Index": str(defect.image_index or 0),
+                "X-Camera-Id": str(defect.camera_id),
+                "X-Defect-Id": str(defect.defect_id),
+            }
+            return Response(content=payload, media_type=_image_media_type(fmt), headers=headers)
+
+        if seq_no is None or image_index is None or x is None or y is None or w is None or h is None:
+            raise HTTPException(status_code=400, detail="Missing crop parameters")
+
         payload = service.crop_custom(
             surface=surface,
             seq_no=seq_no,
@@ -150,6 +184,8 @@ def api_tile_image(
     level: int = Query(default=0, ge=0, le=16),
     tile_x: int = Query(..., ge=0),
     tile_y: int = Query(..., ge=0),
+    width: Optional[int] = Query(default=None, ge=1, le=16384),
+    height: Optional[int] = Query(default=None, ge=1, le=16384),
     orientation: str = Query(default="vertical", pattern="^(horizontal|vertical)$"),
     prefetch: Optional[str] = Query(default=None),
     prefetch_x: Optional[float] = Query(default=None),
@@ -179,6 +215,8 @@ def api_tile_image(
             tile_x=tile_x,
             tile_y=tile_y,
             orientation=orientation,
+            width=width,
+            height=height,
             fmt=fmt,
             viewer_id=resolved_viewer_id,
             prefetch=(

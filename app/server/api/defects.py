@@ -40,7 +40,7 @@ def api_defects(
         scale_y = 1.0
 
     for record in base.items:
-        bbox = record.bbox_source or record.bbox_image
+        bbox = record.bbox_source
         bbox_obj = record.bbox_object
 
         if (scale_x != 1.0 or scale_y != 1.0) and bbox is not None:

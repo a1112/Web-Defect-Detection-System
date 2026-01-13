@@ -56,12 +56,12 @@ class DiskImageCache:
         self._lock = threading.Lock()
 
     def max_level(self) -> int:
-        if self.frame_height <= 0 or self.frame_width <= 0:
+        if self.tile_size <= 0 or self.frame_width <= 0:
             return 0
-        ratio = self.frame_width / self.frame_height
+        ratio = self.frame_width / self.tile_size
         if ratio <= 1:
             return 0
-        return int(math.ceil(math.log(ratio, 2)))
+        return max(0, int(math.floor(math.log(ratio, 2))))
 
     def cache_dir(self, cache_root: Path, seq_no: int, view: Optional[str]) -> Path:
         view_dir = view or self.view_name
@@ -135,6 +135,7 @@ class DiskImageCache:
         tile_x: int,
         tile_y: int,
         payload: bytes,
+        ensure_meta: bool = True,
     ) -> None:
         if not self.enabled or self.read_only:
             return
@@ -148,7 +149,8 @@ class DiskImageCache:
             tile_y=tile_y,
         )
         self._atomic_write(path, payload)
-        self._ensure_cache_json(cache_root, seq_no, view=view)
+        if ensure_meta:
+            self._ensure_cache_json(cache_root, seq_no, view=view)
 
     def read_defect(
         self,
@@ -177,11 +179,18 @@ class DiskImageCache:
         surface: str,
         defect_id: str,
         payload: bytes,
+        ensure_meta: bool = True,
     ) -> None:
         if not self.enabled or self.read_only:
             return
         path = self.defect_path(cache_root, seq_no, view=view, surface=surface, defect_id=defect_id)
         self._atomic_write(path, payload)
+        if ensure_meta:
+            self._ensure_cache_json(cache_root, seq_no, view=view)
+
+    def ensure_cache_meta(self, cache_root: Path, seq_no: int, *, view: Optional[str]) -> None:
+        if not self.enabled or self.read_only:
+            return
         self._ensure_cache_json(cache_root, seq_no, view=view)
 
     def cleanup_seq(
@@ -243,6 +252,10 @@ class DiskImageCache:
                 "max_level": self.max_level(),
                 "format": "JPEG",
             },
+            "image": {
+                "frame_width": self.frame_width,
+                "frame_height": self.frame_height,
+            },
             "defects": {
                 "format": "JPEG",
                 "expand": self.defect_expand,
@@ -252,6 +265,30 @@ class DiskImageCache:
         try:
             self._atomic_write(meta_path, json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"))
             logger.info("disk-cache meta %s 完成", meta_path)
+        except OSError:
+            return
+
+    def update_frame_count(self, cache_root: Path, seq_no: int, *, view: Optional[str], frame_count: int) -> None:
+        if not self.enabled or self.read_only:
+            return
+        base = self.cache_dir(cache_root, seq_no, view)
+        meta_path = base / "cache.json"
+        if not meta_path.exists():
+            self._ensure_cache_json(cache_root, seq_no, view=view)
+        try:
+            existing = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            existing = {}
+        if not isinstance(existing, dict):
+            existing = {}
+        image_meta = existing.get("image") or {}
+        current = int(image_meta.get("frame_count") or 0)
+        if current == int(frame_count):
+            return
+        image_meta["frame_count"] = int(frame_count)
+        existing["image"] = image_meta
+        try:
+            self._atomic_write(meta_path, json.dumps(existing, ensure_ascii=False, indent=2).encode("utf-8"))
         except OSError:
             return
 

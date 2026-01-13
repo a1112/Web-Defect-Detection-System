@@ -20,7 +20,6 @@
     "2D": {
       "frame_width": 16384,
       "frame_height": 1024,
-      "port_offset": 100,
       "auto_size": true
     },
     "small": {

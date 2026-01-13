@@ -12,6 +12,13 @@ from app.server.services.image_service import ImageService
 router = APIRouter(prefix="/api")
 
 
+def _calc_max_tile_level(image_width: int, tile_size: int) -> int:
+    if tile_size <= 0 or image_width <= tile_size:
+        return 0
+    ratio = image_width / tile_size
+    return max(0, int(math.floor(math.log(ratio, 2))))
+
+
 @router.get("/meta")
 def api_meta():
     """
@@ -30,18 +37,20 @@ def api_meta():
     disk_cache = settings.disk_cache
 
     # 瓦片层级与尺寸从配置文件中读取
-    ratio = images.frame_width / images.frame_height if images.frame_height else 1
-    max_level = int(math.ceil(math.log(ratio, 2))) if ratio > 1 else 0
+    max_level = _calc_max_tile_level(images.frame_width, images.frame_height)
 
     tile_meta = {
         "max_level": max_level,
         "min_level": 0,
         "default_tile_size": images.frame_height,
+        "tile_size": images.frame_height,
     }
 
     image_meta = {
         "frame_width": images.frame_width,
         "frame_height": images.frame_height,
+        "org_width": getattr(images, "org_width", None),
+        "org_height": getattr(images, "org_height", None),
     }
 
     return {
@@ -72,7 +81,7 @@ def api_steel_meta(
         tile_size = image_service.settings.images.frame_height
         max_level = 0
         if tile_size > 0 and image_width > tile_size:
-            max_level = int(math.ceil(math.log(image_width / tile_size, 2)))
+            max_level = _calc_max_tile_level(image_width, tile_size)
         surface_images.append(
             SurfaceImageInfo(
                 surface=surf,  # type: ignore[arg-type]
