@@ -13,3 +13,4 @@
 /configs/current/
 *.log
 /error_log
+/.venv

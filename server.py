@@ -884,6 +884,34 @@ def _coerce_int(value: Any) -> int | None:
 
 def _ensure_nginx_running() -> None:
     if sys.platform != "win32":
+        if sys.platform == "darwin":
+            nginx_conf_candidates = [
+                Path("/opt/homebrew/etc/nginx/nginx.conf"),
+                Path("/usr/local/etc/nginx/nginx.conf"),
+            ]
+            nginx_conf_path = next((p for p in nginx_conf_candidates if p.exists()), None)
+            if not nginx_conf_path:
+                logger.warning(
+                    "Nginx config not found in Homebrew paths. Run apply_nginx.sh first."
+                )
+                return
+
+            nginx_running = False
+            for proc in psutil.process_iter(['name']):
+                if proc.info['name'] == 'nginx':
+                    nginx_running = True
+                    break
+
+            if not nginx_running:
+                logger.info("Nginx is not running. Attempting to start Nginx using run_nginx.sh...")
+                run_nginx_sh_path = REPO_ROOT.parent / "run_nginx.sh"
+                try:
+                    subprocess.Popen(["/bin/bash", str(run_nginx_sh_path)])
+                    logger.info("Executed run_nginx.sh. Please verify Nginx started correctly.")
+                except Exception as e:
+                    logger.error("Failed to start Nginx using run_nginx.sh: %s", e)
+                    raise SystemExit(1)
+            return
         return
 
     nginx_conf_path = REPO_ROOT.parent / "plugins" / "platforms" / "windows" / "nginx" / "conf" / "nginx.conf"
