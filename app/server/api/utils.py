@@ -58,7 +58,14 @@ def grade_to_severity(grade: Optional[int] | None) -> str:
 def _defect_class_payload() -> dict:
     defect_class_file = _resolve_defect_class_file()
     with open(defect_class_file, "r", encoding="utf-8") as fp:
-        return json.load(fp)
+        payload = json.load(fp)
+    if isinstance(payload, dict):
+        items = payload.get("items", [])
+        if isinstance(items, list):
+            for item in items:
+                if isinstance(item, dict) and "severity" not in item:
+                    item["severity"] = 1
+    return payload
 
 
 @lru_cache()
