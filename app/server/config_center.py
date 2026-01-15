@@ -10,6 +10,7 @@ from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -209,6 +210,19 @@ class SystemMonitor:
 
 def create_app(manager: ProcessManager) -> FastAPI:
     app = FastAPI(title="Config Center", version="0.1.0")
+    _cors_env = os.getenv("CORS_ALLOW_ORIGINS", "*")
+    _cors_origins = [origin.strip() for origin in _cors_env.split(",") if origin.strip()]
+    if _cors_env != "*":
+        for origin in ("http://tauri.localhost", "https://tauri.localhost"):
+            if origin not in _cors_origins:
+                _cors_origins.append(origin)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_cors_origins if _cors_origins else ["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
     _mount_ui(app)
     monitor = SystemMonitor()
     router = APIRouter(prefix="/config")

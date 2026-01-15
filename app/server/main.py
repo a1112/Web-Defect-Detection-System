@@ -208,8 +208,10 @@ app = FastAPI(title="Web Defect Detection API", version=API_VERSION, lifespan=ap
 
 _cors_env = os.getenv("CORS_ALLOW_ORIGINS", "*")
 _cors_origins = [origin.strip() for origin in _cors_env.split(",") if origin.strip()]
-if _cors_env != "*" and "https://tauri.localhost" not in _cors_origins:
-    _cors_origins.append("https://tauri.localhost")
+if _cors_env != "*":
+    for origin in ("http://tauri.localhost", "https://tauri.localhost"):
+        if origin not in _cors_origins:
+            _cors_origins.append(origin)
 
 app.add_middleware(
     CORSMiddleware,
