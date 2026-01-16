@@ -1,5 +1,5 @@
 {
-  "enabled": false,
+  "enabled": true,
   "record_interval_seconds": 16,
   "generate_defects": true,
   "defect_interval_seconds": 3,
@@ -19,9 +19,9 @@
   "frame_width": 16384,
   "frame_height": 1024,
   "source_seq": 1,
-  "last_seq": 130,
+  "last_seq": 131,
   "line_key": null,
-  "remaining_records": 0,
+  "remaining_records": 20,
   "total_records": 20,
   "image_count_min": 10,
   "image_count_max": 100,
