@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import Optional, List
+from pydantic import BaseModel, Field
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
 
@@ -12,6 +13,28 @@ from app.server.utils.image_ops import encode_image, open_image_from_bytes, resi
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api")
+
+
+class TileInfo(BaseModel):
+    level: int = Field(..., ge=0, le=16)
+    tile_x: int = Field(..., ge=0)
+    tile_y: int = Field(..., ge=0)
+    tile_size: Optional[int] = Field(default=None, ge=1, le=16384)
+
+
+class TilePreheatRequest(BaseModel):
+    surface: str = Field(..., pattern="^(top|bottom)$")
+    seq_no: int = Field(..., ge=0)
+    tiles: List[TileInfo] = Field(...)
+    view: Optional[str] = Field(default=None)
+    priority: Optional[str] = Field(default="normal", pattern="^(low|normal|high)$")
+
+
+class TilePreheatResponse(BaseModel):
+    success: bool
+    preheated: int
+    message: str
+    details: Optional[dict] = None
 
 
 def _image_media_type(fmt: str) -> str:
@@ -273,3 +296,88 @@ def api_tile_image(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/images/tile/preheat", response_model=TilePreheatResponse)
+async def api_tile_preheat(
+    request: TilePreheatRequest,
+    http_request: Request,
+    viewer_id: Optional[str] = Header(default=None, alias="X-Viewer-Id"),
+    service: ImageService = Depends(get_image_service),
+):
+    """
+    预热瓦片到缓存但不返回图像数据
+    
+    这个API允许前端智能预热瓦片，提高缓存命中率：
+    1. 不返回图像数据，仅预热到后端缓存
+    2. 支持批量预热多个瓦片
+    3. 支持优先级调度
+    4. 避免重复预热已缓存的瓦片
+    """
+    try:
+        resolved_viewer_id = viewer_id
+        if not resolved_viewer_id:
+            forwarded = (http_request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+            if forwarded:
+                resolved_viewer_id = forwarded
+            elif http_request.client:
+                resolved_viewer_id = http_request.client.host
+
+        preheated_count = 0
+        failed_count = 0
+        already_cached_count = 0
+        
+        # 处理每个瓦片
+        for tile_info in request.tiles:
+            try:
+                # 检查是否已缓存
+                cache_key = f"{request.surface}-{request.seq_no}-{tile_info.level}-{tile_info.tile_x}-{tile_info.tile_y}-{tile_info.tile_size or service.settings.images.frame_height}-{request.view or 'default'}"
+                
+                if service.tile_cache.get(cache_key) is not None:
+                    already_cached_count += 1
+                    continue
+                
+                # 预热瓦片到缓存（不返回数据）
+                service.get_tile(
+                    surface=request.surface,
+                    seq_no=request.seq_no,
+                    view=request.view,
+                    level=tile_info.level,
+                    tile_x=tile_info.tile_x,
+                    tile_y=tile_info.tile_y,
+                    fmt="JPEG",
+                    viewer_id=resolved_viewer_id,
+                    prefetch=None,  # 不实际返回数据，仅预热到缓存
+                )
+                
+                preheated_count += 1
+                
+            except Exception as e:
+                logger.warning(f"Failed to preheat tile {tile_info.level}-{tile_info.tile_x}-{tile_info.tile_y}: {e}")
+                failed_count += 1
+                continue
+        
+        total_tiles = len(request.tiles)
+        message = f"Processed {total_tiles} tiles: {preheated_count} preheated"
+        if already_cached_count > 0:
+            message += f", {already_cached_count} already cached"
+        if failed_count > 0:
+            message += f", {failed_count} failed"
+        
+        logger.info(f"Tile preheat: {message} (surface={request.surface}, seq_no={request.seq_no}, viewer={resolved_viewer_id})")
+        
+        return TilePreheatResponse(
+            success=True,
+            preheated=preheated_count,
+            message=message,
+            details={
+                "total_requested": total_tiles,
+                "already_cached": already_cached_count,
+                "failed": failed_count,
+                "viewer_id": resolved_viewer_id,
+            }
+        )
+        
+    except Exception as exc:
+        logger.exception("Tile preheat API error")
+        raise HTTPException(status_code=500, detail=f"Preheat failed: {str(exc)}") from exc
