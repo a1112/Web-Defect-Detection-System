@@ -1,5 +1,5 @@
 {
-  "enabled": false,
+  "enabled": true,
   "record_interval_seconds": 6,
   "generate_defects": true,
   "defect_interval_seconds": 3,
@@ -19,20 +19,19 @@
   "frame_width": 16384,
   "frame_height": 1024,
   "source_seq": 1,
-  "last_seq": 98,
+  "last_seq": 100,
   "line_key": null,
-  "remaining_records": 0,
+  "remaining_records": 8,
   "total_records": 10,
   "image_count_min": 10,
   "image_count_max": 200,
   "image_interval_ms": 2000,
   "views": [
-    "2D",
-    "small"
+    "2D"
   ],
   "auto_add_images": true,
   "auto_add_defects": true,
-  "generate_small_view": true,
+  "generate_small_view": false,
   "defect_per_record": 200,
   "interval_seconds": 5
 }

@@ -79,7 +79,7 @@ class CacheRecord(Base):
     line_key = Column(String(64), nullable=False, index=True, comment="产线 key（对应 DEFECT_LINE_KEY 或映射表配置）")
     seq_no = Column(Integer, nullable=False, index=True, comment="钢板流水号 SeqNo")
     surface = Column(String(16), nullable=False, comment="表面：top/bottom")
-    view = Column(String(32), nullable=False, comment="视角模式：2D/small 等")
+    view = Column(String(32), nullable=False, comment="视角模式：2D 等")
     tile_max_level = Column(Integer, nullable=True, comment="瓦片缓存最大层级（cache.json.tile.max_level）")
     tile_size = Column(Integer, nullable=True, comment="瓦片基准尺寸（cache.json.tile.tile_size）")
     defect_expand = Column(Integer, nullable=True, comment="缺陷缓存扩展像素（cache.json.defects.expand）")

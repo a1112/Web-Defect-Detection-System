@@ -1078,9 +1078,7 @@ class ImageService:
         """
         view_dir = view or self.settings.images.default_view
 
-        # 优先尝试读取 record.json 中的 imgNum（如果存在）。
-        # small 实例下，record.json 目前仍保存在 2D 目录，因此需要优先从当前视图读取，
-        # 如果没有再回退到 2D 目录。
+        # Try record.json under the requested view first, then fall back to 2D if needed.
         surface_root = self._surface_root(surface)
         seq_no_fs = self._resolve_seq_no_for_fs(surface_root, seq_no)
         candidate_views: list[str] = [view_dir]

@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, R
 
 from app.server.api.dependencies import get_image_service
 from app.server.services.image_service import ImageService
+from app.server.utils.image_ops import encode_image, open_image_from_bytes, resize_image
 
 logger = logging.getLogger(__name__)
 
@@ -15,6 +16,23 @@ router = APIRouter(prefix="/api")
 
 def _image_media_type(fmt: str) -> str:
     return f"image/{fmt.lower()}"
+
+def _apply_scale(payload: bytes, scale: float, fmt: str, service: ImageService) -> bytes:
+    if not payload or scale is None or scale <= 0:
+        return payload
+    if abs(scale - 1.0) < 1e-3:
+        return payload
+    try:
+        image = open_image_from_bytes(payload, mode=service.mode)
+    except Exception:
+        logger.exception("Failed to decode image for scale=%s", scale)
+        return payload
+    target_w = max(1, int(round(image.width * scale)))
+    target_h = max(1, int(round(image.height * scale)))
+    if target_w == image.width and target_h == image.height:
+        return payload
+    resized = resize_image(image, width=target_w, height=target_h)
+    return encode_image(resized, fmt=fmt)
 
 
 @router.get("/images/frame")
@@ -25,6 +43,7 @@ def api_frame_image(
     width: Optional[int] = Query(default=None, ge=1, le=8192),
     height: Optional[int] = Query(default=None, ge=1, le=8192),
     view: Optional[str] = Query(default=None),
+    scale: float = Query(default=1.0, gt=0.0, le=1.0),
     fmt: str = Query(default="JPEG"),
     service: ImageService = Depends(get_image_service),
 ):
@@ -39,6 +58,7 @@ def api_frame_image(
             height=height,
             fmt=fmt,
         )
+        payload = _apply_scale(payload, scale, fmt, service)
         return Response(content=payload, media_type=_image_media_type(fmt))
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -53,6 +73,7 @@ def api_defect_crop(
     width: Optional[int] = Query(default=None, ge=1, le=4096),
     height: Optional[int] = Query(default=None, ge=1, le=4096),
     force_crop: bool = Query(default=False),
+    scale: float = Query(default=1.0, gt=0.0, le=1.0),
     fmt: str = Query(default="JPEG"),
     service: ImageService = Depends(get_image_service),
 ):
@@ -76,6 +97,7 @@ def api_defect_crop(
             fmt=fmt,
             use_cache=not force_crop,
         )
+        data = _apply_scale(data, scale, fmt, service)
         headers = {
             "X-Seq-No": str(defect.seq_no),
             "X-Image-Index": str(defect.image_index or 0),
@@ -100,6 +122,7 @@ def api_custom_crop(
     width: Optional[int] = Query(default=None, ge=1, le=4096),
     height: Optional[int] = Query(default=None, ge=1, le=4096),
     force_crop: bool = Query(default=False),
+    scale: float = Query(default=1.0, gt=0.0, le=1.0),
     fmt: str = Query(default="JPEG"),
     service: ImageService = Depends(get_image_service),
 ):
@@ -115,6 +138,7 @@ def api_custom_crop(
                 fmt=fmt,
                 use_cache=not force_crop,
             )
+            payload = _apply_scale(payload, scale, fmt, service)
             headers = {
                 "X-Seq-No": str(defect.seq_no),
                 "X-Image-Index": str(defect.image_index or 0),
@@ -139,6 +163,7 @@ def api_custom_crop(
             height=height,
             fmt=fmt,
         )
+        payload = _apply_scale(payload, scale, fmt, service)
         return Response(content=payload, media_type=_image_media_type(fmt))
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -154,6 +179,7 @@ def api_mosaic_image(
     stride: int = Query(default=1, ge=1),
     width: Optional[int] = Query(default=None, ge=1),
     height: Optional[int] = Query(default=None, ge=1),
+    scale: float = Query(default=1.0, gt=0.0, le=1.0),
     fmt: str = Query(default="JPEG"),
     service: ImageService = Depends(get_image_service),
 ):
@@ -170,6 +196,7 @@ def api_mosaic_image(
             height=height,
             fmt=fmt,
         )
+        payload = _apply_scale(payload, scale, fmt, service)
         return Response(content=payload, media_type=_image_media_type(fmt))
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -191,6 +218,7 @@ def api_tile_image(
     prefetch_x: Optional[float] = Query(default=None),
     prefetch_y: Optional[float] = Query(default=None),
     prefetch_image_index: Optional[int] = Query(default=None, ge=0),
+    scale: float = Query(default=1.0, gt=0.0, le=1.0),
     fmt: str = Query(default="JPEG"),
     viewer_id: Optional[str] = Header(default=None, alias="X-Viewer-Id"),
     service: ImageService = Depends(get_image_service),
@@ -230,6 +258,7 @@ def api_tile_image(
                 else None
             ),
         )
+        payload = _apply_scale(payload, scale, fmt, service)
         headers = {
             "X-Tile-Level": str(level),
             "X-Tile-X": str(tile_x),

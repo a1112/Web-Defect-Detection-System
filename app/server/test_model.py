@@ -54,7 +54,7 @@ DEFAULT_CONFIG = {
     "image_count_min": 8,
     "image_count_max": 20,
     "image_interval_ms": 50,
-    "views": ["2D", "small"],
+    "views": ["2D"],
 }
 
 _worker_lock = threading.Lock()

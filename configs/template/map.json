@@ -21,12 +21,6 @@
       "frame_width": 16384,
       "frame_height": 1024,
       "auto_size": true
-    },
-    "small": {
-      "auto_size": true,
-      "frame_width": 8192,
-      "frame_height": 512,
-      "port_offset": 100
     }
   },
   "lines": [

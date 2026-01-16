@@ -102,9 +102,6 @@ def _collect_base_paths(api_list: dict[str, Any] | None) -> list[str]:
         key = item.get("key")
         if isinstance(key, str) and key:
             base_paths.append(f"/api/{key}")
-            small_path = item.get("small_path")
-            if isinstance(small_path, str) and small_path:
-                base_paths.append(f"{small_path}/{key}")
         path = item.get("path")
         if isinstance(path, str) and path:
             base_paths.append(path)
@@ -117,8 +114,6 @@ def _collect_base_paths(api_list: dict[str, Any] | None) -> list[str]:
     ordered: list[str] = []
     for path in base_paths:
         if path in seen:
-            continue
-        if "small--api" in path:
             continue
         seen.add(path)
         ordered.append(path)

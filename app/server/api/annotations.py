@@ -15,7 +15,7 @@ from app.server.schemas import (
     DefectAnnotationUpdate,
 )
 
-router = APIRouter()
+router = APIRouter(prefix="/api")
 
 
 def _to_item(record: DefectAnnotation) -> DefectAnnotationItem:

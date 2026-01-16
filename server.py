@@ -512,7 +512,6 @@ class LineProcessManager:
         items: list[dict[str, Any]] = []
         for key, group in self._lines.items():
             main_proc = next((item for item in group if item.kind in ("2D", "default")), None)
-            small_proc = next((item for item in group if item.kind == "small"), None)
             view_items = [
                 {
                     "view": item.kind,
@@ -529,7 +528,6 @@ class LineProcessManager:
                     "name": main_proc.name if main_proc else (group[0].name if group else key),
                     "host": main_proc.host if main_proc else (group[0].host if group else "0.0.0.0"),
                     "port": main_proc.port if main_proc else None,
-                    "small_port": small_proc.port if small_proc else None,
                     "ip": main_proc.ip if main_proc else (group[0].ip if group else None),
                     "profile": main_proc.profile if main_proc else None,
                     "pid": process.pid if process else None,
@@ -538,7 +536,6 @@ class LineProcessManager:
                     "latest_timestamp": status.get("latest_timestamp"),
                     "latest_age_seconds": status.get("latest_age_seconds"),
                     "path": f"/api/{key}",
-                    "small_path": f"/small--api/{key}",
                     "views": view_items,
                 }
             )

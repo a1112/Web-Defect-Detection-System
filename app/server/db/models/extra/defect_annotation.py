@@ -15,7 +15,7 @@ class DefectAnnotation(Base):
     line_key = Column(String(64), nullable=False, index=True, comment="产线 key")
     seq_no = Column(Integer, nullable=False, index=True, comment="钢板流水号 SeqNo")
     surface = Column(String(16), nullable=False, comment="表面：top/bottom")
-    view = Column(String(32), nullable=False, comment="视角模式：2D/small 等")
+    view = Column(String(32), nullable=False, comment="视角模式：2D 等")
 
     user = Column(String(64), nullable=True, comment="用户")
     method = Column(String(16), nullable=False, comment="标注方式：manual/auto")
