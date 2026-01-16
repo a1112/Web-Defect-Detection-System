@@ -358,6 +358,8 @@ def _copy_images(seq_no: int, config: dict[str, Any], *, image_count: int) -> in
 
     for offset in range(effective_count):
         current_index = start_index + offset
+        per_image_files: list[str] = []
+        per_image_surfaces: set[str] = set()
         for surface, info in surface_info.items():
             root = info["root"]
             target_dir = root / str(seq_no)
@@ -376,10 +378,22 @@ def _copy_images(seq_no: int, config: dict[str, Any], *, image_count: int) -> in
                 target_view.mkdir(parents=True, exist_ok=True)
                 target_path = target_view / f"{current_index}.jpg"
                 shutil.copy2(selected[offset], target_path)
+                per_image_files.append(str(target_path))
+                per_image_surfaces.add(surface)
                 surface_summary["files"] += 1
                 if len(log_summary["samples"]) < 3:
                     log_summary["samples"].append(str(target_path))
                 latest_index = current_index if latest_index is None else max(latest_index, current_index)
+        if per_image_files:
+            _append_log(
+                "生成图像",
+                {
+                    "seq_no": seq_no,
+                    "image_index": current_index,
+                    "surfaces": sorted(per_image_surfaces),
+                    "files": per_image_files,
+                },
+            )
         if image_interval_ms > 0:
             time.sleep(image_interval_ms / 1000.0)
 
@@ -743,6 +757,7 @@ def status() -> dict[str, Any]:
     current_index = status_payload.get("current_image_index")
     if current_index is None and current_seq:
         current_index = _resolve_image_index_max(int(current_seq), config)
+    top_root, bottom_root = _image_roots(config)
     return {
         "enabled": True,
         "running": bool(
@@ -758,6 +773,8 @@ def status() -> dict[str, Any]:
         "defect_count": defect_count,
         "database_name": settings.database.database_type,
         "database_url": _build_url(settings.database, settings.database.database_type),
+        "image_top_root": str(top_root),
+        "image_bottom_root": str(bottom_root),
     }
 
 
